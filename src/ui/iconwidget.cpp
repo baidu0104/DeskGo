@@ -1,0 +1,228 @@
+#include "iconwidget.h"
+#include <QPainter>
+#include <QPainterPath>
+#include <QMouseEvent>
+#include <QDrag>
+#include <QMimeData>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QMenu>
+#include <QStyle>
+#include <QDebug>
+#include "../platform/blurhelper.h"
+
+IconWidget::IconWidget(const IconData &data, QWidget *parent)
+    : QWidget(parent)
+    , m_data(data)
+{
+    setupUi();
+}
+
+void IconWidget::setupUi()
+{
+    setFixedSize(80, 90);
+    setCursor(Qt::PointingHandCursor);
+
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(4);
+    layout->setAlignment(Qt::AlignCenter);
+
+    // 图标
+    m_iconLabel = new QLabel(this);
+    m_iconLabel->setFixedSize(48, 48);
+    m_iconLabel->setAlignment(Qt::AlignCenter);
+    m_iconLabel->setScaledContents(false);
+
+    if (!m_data.icon.isNull()) {
+        m_iconLabel->setPixmap(m_data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    } else {
+        // 图标加载失败时的后备显示：使用系统标准文件图标
+        QIcon fallbackIcon = style()->standardIcon(QStyle::SP_FileIcon);
+        m_iconLabel->setPixmap(fallbackIcon.pixmap(48, 48));
+        // m_iconLabel->setText("?");
+        // m_iconLabel->setStyleSheet("color: red; ...");
+    }
+    layout->addWidget(m_iconLabel, 0, Qt::AlignCenter);
+
+    // 名称
+    m_nameLabel = new QLabel(this);
+    m_nameLabel->setAlignment(Qt::AlignCenter);
+    m_nameLabel->setWordWrap(false);  // 不换行
+    m_nameLabel->setFixedWidth(72);   // 限制宽度
+    m_nameLabel->setMaximumHeight(30);
+    
+    // 截断长文本
+    QFontMetrics fm(m_nameLabel->font());
+    QString elidedText = fm.elidedText(m_data.name, Qt::ElideMiddle, 68);
+    m_nameLabel->setText(elidedText);
+    
+    // 增加调试信息
+    setToolTip(m_data.path);
+    
+    m_nameLabel->setStyleSheet(R"(
+        QLabel {
+            color: #ffffff;
+            font-size: 11px;
+            background: transparent;
+        }
+    )");
+    layout->addWidget(m_nameLabel);
+}
+
+IconWidget::IconData IconWidget::data() const
+{
+    return m_data;
+}
+
+void IconWidget::setData(const IconData &data)
+{
+    m_data = data;
+    
+    // 截断长文本
+    QFontMetrics fm(m_nameLabel->font());
+    QString elidedText = fm.elidedText(data.name, Qt::ElideMiddle, 68);
+    m_nameLabel->setText(elidedText);
+    
+    setToolTip(data.path);
+    if (!data.icon.isNull()) {
+        m_iconLabel->setPixmap(data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+}
+
+QString IconWidget::name() const
+{
+    return m_data.name;
+}
+
+QString IconWidget::path() const
+{
+    return m_data.path;
+}
+
+void IconWidget::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    if (m_hovered || m_pressed) {
+        QPainterPath path;
+        path.addRoundedRect(rect().adjusted(2, 2, -2, -2), 6, 6);
+
+        QColor bgColor = m_pressed ? QColor(255, 255, 255, 40) : QColor(255, 255, 255, 25);
+        painter.fillPath(path, bgColor);
+
+        painter.setPen(QPen(QColor(255, 255, 255, 50), 1));
+        painter.drawPath(path);
+    }
+}
+
+void IconWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton) {
+        m_pressed = true;
+        m_pressPos = event->pos();
+        update();
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void IconWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_pressed && (event->pos() - m_pressPos).manhattanLength() > 10) {
+        // 开始拖拽
+        m_pressed = false;
+        update();
+
+        qDebug() << "[IconWidget] Starting drag for:" << m_data.path;
+
+        QDrag *drag = new QDrag(this);
+        QMimeData *mimeData = new QMimeData();
+        mimeData->setData("application/x-deskgo-icon", m_data.path.toUtf8());
+        drag->setMimeData(mimeData);
+
+        if (!m_data.icon.isNull()) {
+            drag->setPixmap(m_data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        }
+
+        emit dragStarted();
+        Qt::DropAction result = drag->exec(Qt::MoveAction);
+        qDebug() << "[IconWidget] Drag finished, result:" << result;
+    }
+    QWidget::mouseMoveEvent(event);
+}
+
+void IconWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && m_pressed) {
+        // 如果是点击操作（不是拖拽），且在控件范围内
+        if (rect().contains(event->pos())) {
+            // 打开文件/快捷方式
+            if (!m_data.path.isEmpty()) {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(m_data.path));
+            }
+            emit doubleClicked(); // 仍然发出这个信号以防外部使用，或者可以改名为 clicked
+        }
+    }
+    m_pressed = false;
+    update();
+    QWidget::mouseReleaseEvent(event);
+}
+
+void IconWidget::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    // 已经改为单击打开，这里不再处理
+    QWidget::mouseDoubleClickEvent(event);
+}
+
+void IconWidget::enterEvent(QEvent *event)
+{
+    m_hovered = true;
+    update();
+    QWidget::enterEvent(event);
+}
+
+void IconWidget::leaveEvent(QEvent *event)
+{
+    m_hovered = false;
+    m_pressed = false;
+    update();
+    QWidget::leaveEvent(event);
+}
+
+void IconWidget::contextMenuEvent(QContextMenuEvent *event)
+{
+    QMenu menu(this);
+    menu.setAttribute(Qt::WA_TranslucentBackground);
+    menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    
+    // 启用毛玻璃效果
+    BlurHelper::enableBlur(&menu, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
+    BlurHelper::enableRoundedCorners(&menu);
+
+    menu.setStyleSheet(R"(
+        QMenu {
+            background: rgba(30, 30, 35, 10);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            padding: 4px;
+        }
+        QMenu::item {
+            color: #ffffff;
+            padding: 8px 20px;
+            border-radius: 4px;
+        }
+        QMenu::item:selected {
+            background: rgba(255, 255, 255, 0.1);
+        }
+    )");
+
+    QAction *deleteAction = menu.addAction("删除");
+    QAction *selected = menu.exec(event->globalPos());
+
+    if (selected == deleteAction) {
+        emit removeRequested();
+    }
+}
