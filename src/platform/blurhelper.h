@@ -44,10 +44,18 @@ public:
     static bool isSupported();
     
     /**
-     * @brief 启用 Windows 11 原生圆角
+     * @brief 启用圆角效果
      * @param widget 目标窗口
+     * @param radius 圆角半径 (仅在 Windows 10 上使用)
+     * Windows 11 使用 DWM 原生圆角，Windows 10 使用 SetWindowRgn 裁剪
      */
-    static void enableRoundedCorners(QWidget *widget);
+    static void enableRoundedCorners(QWidget *widget, int radius = 10);
+    
+    /**
+     * @brief 检查是否为 Windows 11 或更高版本
+     * @return 是否为 Windows 11+
+     */
+    static bool isWindows11();
 
 private:
 #ifdef Q_OS_WIN

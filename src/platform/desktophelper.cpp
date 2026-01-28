@@ -117,7 +117,7 @@ QPoint DesktopHelper::getIconPosition(const QString &filePath)
     qDebug() << "  targetFileName:" << targetFileName << ", targetBaseName:" << targetBaseName;
 
     for (int i = 0; i < count; ++i) {
-        LVITEM item = {0};
+        LVITEM item = {};
         item.mask = LVIF_TEXT;
         item.iItem = i;
         item.iSubItem = 0;
@@ -197,7 +197,7 @@ void DesktopHelper::setIconPosition(const QString &filePath, const QPoint &pos, 
     int targetIndex = -1;
 
     for (int i = 0; i < count; ++i) {
-        LVITEM item = {0};
+        LVITEM item = {};
         item.mask = LVIF_TEXT;
         item.iItem = i;
         item.iSubItem = 0;
@@ -263,7 +263,7 @@ void DesktopHelper::notifyFileRemoved(const QString &filePath)
                 QString targetBaseName = QFileInfo(filePath).completeBaseName();
                 
                 for (int i = 0; i < count; ++i) {
-                    LVITEM item = {0};
+                    LVITEM item = {};
                     item.mask = LVIF_TEXT;
                     item.iItem = i;
                     item.iSubItem = 0;

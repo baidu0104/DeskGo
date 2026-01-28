@@ -2,7 +2,34 @@
 
 #ifdef Q_OS_WIN
 #include <dwmapi.h>
-#pragma comment(lib, "dwmapi.lib")
+#include <VersionHelpers.h>
+
+// 检测是否为 Windows 11 或更高版本
+// Windows 11 的构建号从 22000 开始
+static bool isWindows11OrLater()
+{
+    static int cached = -1;
+    if (cached == -1) {
+        OSVERSIONINFOEXW osvi;
+        memset(&osvi, 0, sizeof(osvi));
+        osvi.dwOSVersionInfoSize = sizeof(osvi);
+        typedef NTSTATUS (WINAPI *RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtdll) {
+            RtlGetVersionPtr pRtlGetVersion = (RtlGetVersionPtr)(void*)GetProcAddress(hNtdll, "RtlGetVersion");
+            if (pRtlGetVersion) {
+                pRtlGetVersion((PRTL_OSVERSIONINFOW)&osvi);
+                cached = (osvi.dwBuildNumber >= 22000) ? 1 : 0;
+            } else {
+                cached = 0;
+            }
+        } else {
+            cached = 0;
+        }
+    }
+    return cached == 1;
+}
+
 
 // Windows 未公开的 API 结构体定义
 enum ACCENT_STATE {
@@ -45,7 +72,7 @@ static bool initApi()
         HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
         if (hUser32) {
             pSetWindowCompositionAttribute = 
-                (pfnSetWindowCompositionAttribute)GetProcAddress(hUser32, "SetWindowCompositionAttribute");
+                (pfnSetWindowCompositionAttribute)(void*)GetProcAddress(hUser32, "SetWindowCompositionAttribute");
             success = (pSetWindowCompositionAttribute != nullptr);
         }
     }
@@ -140,20 +167,41 @@ bool BlurHelper::isSupported()
 #endif
 }
 
-void BlurHelper::enableRoundedCorners(QWidget *widget)
+void BlurHelper::enableRoundedCorners(QWidget *widget, int radius)
 {
 #ifdef Q_OS_WIN
     if (!widget) return;
     HWND hwnd = reinterpret_cast<HWND>(widget->winId());
-    if (hwnd) {
-        // DWMWA_WINDOW_CORNER_PREFERENCE = 33
-        // DWMWCP_ROUND = 2
+    if (!hwnd) return;
+    
+    if (isWindows11OrLater()) {
+        // Windows 11: 使用 DWM 原生圆角
+        // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
         int preference = 2;
-        // 动态加载 DwmSetWindowAttribute 防止在旧系统崩溃（虽然通常 dwmapi.dll 都存在）
-        // 这里直接调用，假设构建环境有 dwmapi.lib
         DwmSetWindowAttribute(hwnd, 33, &preference, sizeof(preference));
+    } else {
+        // Windows 10: 使用窗口区域裁剪实现圆角
+        RECT rect;
+        GetWindowRect(hwnd, &rect);
+        int w = rect.right - rect.left;
+        int h = rect.bottom - rect.top;
+        // 注意：CreateRoundRectRgn 的坐标是 (x1, y1, x2, y2)，其中 x2 和 y2 是不包含的边界
+        // 所以 x2 应该设为 w，y2 应该设为 h，这样有效区域是 0 到 w-1，0 到 h-1
+        HRGN hRgn = CreateRoundRectRgn(0, 0, w, h, radius, radius);
+        SetWindowRgn(hwnd, hRgn, TRUE);
+        // 注意：SetWindowRgn 会接管 hRgn 的所有权，不需要手动删除
     }
 #else
     Q_UNUSED(widget);
+    Q_UNUSED(radius);
+#endif
+}
+
+bool BlurHelper::isWindows11()
+{
+#ifdef Q_OS_WIN
+    return isWindows11OrLater();
+#else
+    return false;
 #endif
 }

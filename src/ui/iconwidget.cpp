@@ -198,24 +198,25 @@ void IconWidget::contextMenuEvent(QContextMenuEvent *event)
     menu.setAttribute(Qt::WA_TranslucentBackground);
     menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
     
-    // 启用毛玻璃效果
-    BlurHelper::enableBlur(&menu, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
-    BlurHelper::enableRoundedCorners(&menu);
-
     menu.setStyleSheet(R"(
         QMenu {
-            background: rgba(30, 30, 35, 10);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background-color: rgba(45, 45, 50, 240);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
             padding: 4px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
         }
         QMenu::item {
+            background: transparent;
             color: #ffffff;
-            padding: 8px 20px;
+            padding: 5px 24px;
+            min-height: 20px;
             border-radius: 4px;
+            margin: 2px 4px;
         }
         QMenu::item:selected {
-            background: rgba(255, 255, 255, 0.1);
+            background-color: #505055;
         }
     )");
 

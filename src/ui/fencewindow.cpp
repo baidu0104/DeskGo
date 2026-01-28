@@ -29,7 +29,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
-#pragma comment(lib, "dwmapi.lib")
 #endif
 
 #include <QtWin>
@@ -37,7 +36,7 @@
 
 // 日志记录函数
 void logToDesktop(const QString &msg) {
-    // Q_UNUSED(msg);
+    Q_UNUSED(msg);
     // 调试日志已禁用
 }
 
@@ -46,7 +45,7 @@ static QPixmap getWinIcon(const QString &path) {
     // logToDesktop("Getting icon for: " + path);
     
     // 确保 COM 初始化
-    HRESULT hr = CoInitialize(NULL);
+    CoInitialize(NULL);
     // logToDesktop(QString("CoInitialize result: %1").arg((unsigned long)hr, 0, 16));
     
     SHFILEINFO shfi;
@@ -139,10 +138,7 @@ void FenceWindow::setupUi()
     setAcceptDrops(true);  // 接受拖放
 
 #ifdef Q_OS_WIN
-    // 尝试开启 Windows 11 原生圆角 (DWMWA_WINDOW_CORNER_PREFERENCE = 33)
-    // DWMWCP_ROUND = 2
-    int cornerPreference = 2;
-    DwmSetWindowAttribute((HWND)winId(), 33, &cornerPreference, sizeof(int));
+    // 圆角效果将在 showEvent 中通过 BlurHelper 统一处理
 #endif
 
     auto *mainLayout = new QVBoxLayout(this);
@@ -181,15 +177,41 @@ void FenceWindow::setupUi()
 
 void FenceWindow::setupBlurEffect()
 {
-    // 启用系统毛玻璃效果 (Acrylic)
-    // TintColor 的 Alpha 值决定了混合程度，100-160 是比较合适的值
-    BlurHelper::enableBlur(this, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
+    // Windows 11: 使用原生 Acrylic 和圆角，效果最佳
+    if (BlurHelper::isWindows11()) {
+         BlurHelper::enableBlur(this, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
+         BlurHelper::enableRoundedCorners(this, 10);
+    } else {
+        // Windows 10: 禁用 DWM 模糊和 Region 裁剪
+        // 使用纯 Qt 半透明背景，以获得平滑的抗锯齿圆角，避免黑边和裁剪伪影
+        // 不需要调用 enableBlur 或 enableRoundedCorners
+    }
 }
 
 void FenceWindow::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     setupBlurEffect();
+}
+
+void FenceWindow::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    
+    // Windows 10 不需要手动更新区域，完全依赖 Qt 的 TranslucentBackground
+    if (BlurHelper::isWindows11()) {
+        // Win11 原生圆角不需要在 resize 时重新设置，但为了保险起见保持不变或移除
+    }
+    
+    // 更新 Expanded Height (仅在展开状态下更新)
+    if (!m_collapsed) {
+        m_expandedHeight = height();
+    }
+
+    // 触发保存（使用防抖动延迟）
+    if (m_saveTimer) {
+        m_saveTimer->start();
+    }
 }
 
 QString FenceWindow::title() const
@@ -621,12 +643,13 @@ void FenceWindow::paintEvent(QPaintEvent *event)
     p.setRenderHint(QPainter::Antialiasing);
     
     QPainterPath path;
-    path.addRoundedRect(rect(), 8, 8);
+    path.addRoundedRect(rect(), 10, 10);
     
-    // 背景色（设为极低透明度，让系统毛玻璃效果透出来）
-    // 如果系统不支持毛玻璃，这可能会导致背景太透，但在 Win10/11 上是必须的
-    // 稍微提高一点透明度 (15/255) 以确保鼠标事件能被正确捕获，防止穿透
-    p.fillPath(path, QColor(30, 30, 35, 15));
+    // 背景色
+    // Win11 开启了毛玻璃，可以使用较低透明度
+    // Win10 纯色背景，需要较高不透明度以保证可读性
+    int alpha = BlurHelper::isWindows11() ? 15 : 200;
+    p.fillPath(path, QColor(30, 30, 35, alpha));
     
     // 边框
     p.setPen(QPen(QColor(255, 255, 255, 30), 1));
@@ -800,18 +823,7 @@ void FenceWindow::mouseDoubleClickEvent(QMouseEvent *event)
     }
 }
 
-void FenceWindow::resizeEvent(QResizeEvent *event)
-{
-    QWidget::resizeEvent(event);
-    
-    // 更新 Expanded Height
-    if (!m_collapsed) {
-        m_expandedHeight = height();
-    }
-    
-    // 触发保存防抖
-    if (m_saveTimer) m_saveTimer->start();
-}
+
 
 void FenceWindow::moveEvent(QMoveEvent *event)
 {
@@ -841,25 +853,26 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
     QMenu menu(this);
     menu.setAttribute(Qt::WA_TranslucentBackground);
     menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
-    
-    // 启用毛玻璃效果
-    BlurHelper::enableBlur(&menu, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
-    BlurHelper::enableRoundedCorners(&menu);
 
     menu.setStyleSheet(R"(
         QMenu {
-            background: rgba(30, 30, 35, 10);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background-color: rgba(45, 45, 50, 230);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
             padding: 4px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
         }
         QMenu::item {
+            background: transparent;
             color: #ffffff;
-            padding: 8px 20px;
+            padding: 5px 24px;
+            min-height: 20px;
             border-radius: 4px;
+            margin: 2px 4px;
         }
         QMenu::item:selected {
-            background: rgba(255, 255, 255, 0.1);
+            background-color: #505055;
         }
         QMenu::separator {
             height: 1px;
