@@ -57,9 +57,6 @@ void IconWidget::setupUi()
     QString elidedText = fm.elidedText(m_data.name, Qt::ElideMiddle, 68);
     m_nameLabel->setText(elidedText);
     
-    // 增加调试信息
-    setToolTip(m_data.path);
-    
     m_nameLabel->setStyleSheet(R"(
         QLabel {
             color: #ffffff;
@@ -84,7 +81,6 @@ void IconWidget::setData(const IconData &data)
     QString elidedText = fm.elidedText(data.name, Qt::ElideMiddle, 68);
     m_nameLabel->setText(elidedText);
     
-    setToolTip(data.path);
     if (!data.icon.isNull()) {
         m_iconLabel->setPixmap(data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }

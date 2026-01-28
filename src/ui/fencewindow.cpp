@@ -177,15 +177,12 @@ void FenceWindow::setupUi()
 
 void FenceWindow::setupBlurEffect()
 {
-    // Windows 11: 使用原生 Acrylic 和圆角，效果最佳
+    // Windows 11: 使用原生圆角
     if (BlurHelper::isWindows11()) {
-         BlurHelper::enableBlur(this, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
          BlurHelper::enableRoundedCorners(this, 10);
-    } else {
-        // Windows 10: 禁用 DWM 模糊和 Region 裁剪
-        // 使用纯 Qt 半透明背景，以获得平滑的抗锯齿圆角，避免黑边和裁剪伪影
-        // 不需要调用 enableBlur 或 enableRoundedCorners
     }
+    // 不启用 DWM 模糊，使用纯 Qt 半透明背景
+    // 避免兼容性问题和拖动闪烁
 }
 
 void FenceWindow::showEvent(QShowEvent *event)
@@ -536,8 +533,9 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
                  return true;
              }
              
-             // 其他区域视为标题栏
-             *result = HTCAPTION;
+             // 其他区域返回 HTCLIENT，让 Qt 处理拖动
+             // 不使用 HTCAPTION 以避免与 Qt 的拖动逻辑冲突
+             *result = HTCLIENT;
              return true;
         }
 
@@ -591,8 +589,9 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
         }
         
         // 标题栏检测 (用于移动)
+        // 返回 HTCLIENT 让 Qt 处理拖动，不使用 HTCAPTION 以避免与 Qt 的拖动逻辑冲突
         if (titleBarRect().contains(lp)) {
-            *result = HTCAPTION;
+            *result = HTCLIENT;
             return true;
         }
         
@@ -645,11 +644,8 @@ void FenceWindow::paintEvent(QPaintEvent *event)
     QPainterPath path;
     path.addRoundedRect(rect(), 10, 10);
     
-    // 背景色
-    // Win11 开启了毛玻璃，可以使用较低透明度
-    // Win10 纯色背景，需要较高不透明度以保证可读性
-    int alpha = BlurHelper::isWindows11() ? 15 : 200;
-    p.fillPath(path, QColor(30, 30, 35, alpha));
+    // 背景色 - 半透明深色背景
+    p.fillPath(path, QColor(30, 30, 35, 200));
     
     // 边框
     p.setPen(QPen(QColor(255, 255, 255, 30), 1));
@@ -659,6 +655,22 @@ void FenceWindow::paintEvent(QPaintEvent *event)
     if (!m_collapsed) {
         p.setPen(QPen(QColor(255, 255, 255, 20), 1));
         p.drawLine(10, 32, width() - 10, 32);
+    }
+    
+    // 绘制拖拽插入位置指示器
+    if (m_showDropIndicator && !m_dropIndicatorRect.isNull()) {
+        // 将内容区域的坐标转换为窗口坐标
+        QRect indicatorRect = m_dropIndicatorRect.translated(m_contentArea->pos());
+        
+        // 绘制蓝色半透明竖线
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(100, 150, 255, 180));
+        p.drawRoundedRect(indicatorRect, 2, 2);
+        
+        // 绘制边缘高光
+        p.setPen(QPen(QColor(150, 200, 255, 220), 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(indicatorRect, 2, 2);
     }
 }
 
@@ -714,6 +726,7 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
             QApplication::setOverrideCursor(QCursor(shape));
             
         } else if (titleBarRect().contains(event->pos())) {
+            // 只允许标题栏区域拖动
             m_isDragging = true;
         }
         
@@ -800,6 +813,42 @@ void FenceWindow::mouseReleaseEvent(QMouseEvent *event)
     if (m_isDragging || m_isResizing) {
         if (m_isResizing) {
             QApplication::restoreOverrideCursor();
+        }
+        
+        // 拖动结束后，确保围栏至少部分在屏幕内
+        if (m_isDragging) {
+            QScreen *screen = QApplication::screenAt(geometry().center());
+            if (!screen) {
+                screen = QApplication::primaryScreen();
+            }
+            if (screen) {
+                QRect screenRect = screen->availableGeometry();
+                QPoint newPos = pos();
+                
+                // 确保至少 50 像素在屏幕内
+                const int minVisible = 50;
+                
+                // 左边界：窗口右边缘至少留 minVisible 在屏幕内
+                if (newPos.x() + width() < screenRect.left() + minVisible) {
+                    newPos.setX(screenRect.left() + minVisible - width());
+                }
+                // 右边界：窗口左边缘至少留 minVisible 在屏幕内
+                if (newPos.x() > screenRect.right() - minVisible) {
+                    newPos.setX(screenRect.right() - minVisible);
+                }
+                // 上边界：窗口下边缘至少留 minVisible 在屏幕内
+                if (newPos.y() + height() < screenRect.top() + minVisible) {
+                    newPos.setY(screenRect.top() + minVisible - height());
+                }
+                // 下边界：窗口上边缘至少留 minVisible 在屏幕内
+                if (newPos.y() > screenRect.bottom() - minVisible) {
+                    newPos.setY(screenRect.bottom() - minVisible);
+                }
+                
+                if (newPos != pos()) {
+                    move(newPos);
+                }
+            }
         }
         
         m_isDragging = false;
@@ -918,7 +967,88 @@ void FenceWindow::dragMoveEvent(QDragMoveEvent *event)
 {
     if (event->mimeData()->hasFormat("application/x-deskgo-icon") || event->mimeData()->hasUrls()) {
         event->acceptProposedAction();
+        
+        // 如果是内部图标拖拽，显示插入位置指示器
+        if (event->mimeData()->hasFormat("application/x-deskgo-icon")) {
+            QString iconPath = QString::fromUtf8(event->mimeData()->data("application/x-deskgo-icon"));
+            
+            // 查找当前拖拽的图标在本围栏中的索引
+            int draggedIconIndex = -1;
+            for (int i = 0; i < m_icons.size(); ++i) {
+                if (m_icons[i]->path() == iconPath) {
+                    draggedIconIndex = i;
+                    break;
+                }
+            }
+            
+            QPoint dropPos = event->pos();
+            QPoint contentPos = m_contentArea->mapFrom(this, dropPos);
+            
+            // 计算插入位置
+            int targetIndex = m_icons.size(); // 默认末尾
+            QRect indicatorRect;
+            
+            for (int i = 0; i < m_icons.size(); ++i) {
+                IconWidget *icon = m_icons[i];
+                QRect iconRect = icon->geometry();
+                
+                // 如果鼠标在图标左半部分
+                if (contentPos.x() < iconRect.center().x()) {
+                    if (contentPos.y() < iconRect.bottom() + 20) {
+                        targetIndex = i;
+                        // 指示器位置在该图标左侧
+                        indicatorRect = QRect(
+                            iconRect.left() - 1,
+                            iconRect.top(),
+                            2,
+                            iconRect.height()
+                        );
+                        break;
+                    }
+                }
+            }
+            
+            // 如果没有找到合适位置（放到末尾）
+            if (targetIndex == m_icons.size() && !m_icons.isEmpty()) {
+                IconWidget *lastIcon = m_icons.last();
+                QRect lastRect = lastIcon->geometry();
+                indicatorRect = QRect(
+                    lastRect.right() + 1,
+                    lastRect.top(),
+                    2,
+                    lastRect.height()
+                );
+            }
+            
+            // 如果是同一围栏内拖拽，检查是否拖到无效位置
+            if (draggedIconIndex != -1) {
+                // 首位图标不能再往前拖（targetIndex == 0 且 draggedIconIndex == 0）
+                // 末位图标不能再往后拖（targetIndex == size 且 draggedIconIndex == size-1）
+                // 拖到自己当前位置或紧邻后面位置也不显示指示器
+                if ((draggedIconIndex == 0 && targetIndex == 0) ||
+                    (draggedIconIndex == m_icons.size() - 1 && targetIndex == m_icons.size()) ||
+                    (targetIndex == draggedIconIndex || targetIndex == draggedIconIndex + 1)) {
+                    // 不显示指示器
+                    m_showDropIndicator = false;
+                    update();
+                    return;
+                }
+            }
+            
+            m_showDropIndicator = !indicatorRect.isNull();
+            m_dropIndicatorIndex = targetIndex;
+            m_dropIndicatorRect = indicatorRect;
+            update(); // 触发重绘
+        }
     }
+}
+
+void FenceWindow::dragLeaveEvent(QDragLeaveEvent *event)
+{
+    Q_UNUSED(event)
+    m_hovered = false;
+    m_showDropIndicator = false;
+    update();
 }
 
 #include <QtWin>
@@ -936,15 +1066,88 @@ void FenceWindow::dropEvent(QDropEvent *event)
         QString iconPath = QString::fromUtf8(mimeData->data("application/x-deskgo-icon"));
         logToDesktop("  iconPath: " + iconPath);
         
-        // 首先检查图标是否已存在于当前围栏
-        for (IconWidget *icon : m_icons) {
-            if (icon->path() == iconPath) {
-                // 图标已在当前围栏，不需要操作
-                event->acceptProposedAction();
-                m_hovered = false;
-                update();
-                return;
+        // 检查图标是否在当前围栏（同围栏内排序）
+        IconWidget *existingIcon = nullptr;
+        int existingIndex = -1;
+        for (int i = 0; i < m_icons.size(); ++i) {
+            if (m_icons[i]->path() == iconPath) {
+                existingIcon = m_icons[i];
+                existingIndex = i;
+                break;
             }
+        }
+        
+        if (existingIcon) {
+            // 图标在同一围栏内，执行拖拽排序
+            QPoint dropPos = event->pos();
+            QPoint contentPos = m_contentArea->mapFrom(this, dropPos);
+            
+            logToDesktop("  Same fence reorder - dropPos: " + QString::number(contentPos.x()) + "," + QString::number(contentPos.y()));
+            
+            // 计算目标插入位置
+            int targetIndex = m_icons.size(); // 默认放到末尾
+            
+            for (int i = 0; i < m_icons.size(); ++i) {
+                IconWidget *icon = m_icons[i];
+                QRect iconRect = icon->geometry();
+                
+                // 如果放置位置在图标的左半部分，插入到该位置之前
+                if (contentPos.x() < iconRect.center().x()) {
+                    // 检查 Y 坐标是否在同一行或之前的行
+                    if (contentPos.y() < iconRect.bottom() + 20) {
+                        targetIndex = i;
+                        break;
+                    }
+                }
+            }
+            
+            logToDesktop("  existingIndex: " + QString::number(existingIndex) + " targetIndex: " + QString::number(targetIndex));
+            
+            // 如果需要移动
+            if (targetIndex != existingIndex && targetIndex != existingIndex + 1) {
+                FlowLayout *flowLayout = dynamic_cast<FlowLayout*>(m_contentLayout);
+                
+                // 从当前位置移除
+                m_icons.removeAt(existingIndex);
+                if (flowLayout) {
+                    int layoutIdx = flowLayout->indexOf(existingIcon);
+                    if (layoutIdx >= 0) {
+                        flowLayout->takeAt(layoutIdx);
+                    }
+                }
+                
+                // 调整目标索引
+                if (existingIndex < targetIndex) {
+                    targetIndex--;
+                }
+                
+                // 插入到新位置
+                if (targetIndex >= m_icons.size()) {
+                    m_icons.append(existingIcon);
+                    if (flowLayout) {
+                        flowLayout->addItem(new QWidgetItem(existingIcon));
+                    }
+                } else {
+                    m_icons.insert(targetIndex, existingIcon);
+                    if (flowLayout) {
+                        flowLayout->insertItem(targetIndex, new QWidgetItem(existingIcon));
+                    }
+                }
+                
+                // 强制重新布局
+                m_contentLayout->invalidate();
+                m_contentArea->updateGeometry();
+                m_contentArea->update();
+                
+                emit geometryChanged();
+                logToDesktop("  Reorder completed!");
+            }
+            
+            event->acceptProposedAction();
+            m_hovered = false;
+            m_showDropIndicator = false;  // 清除插入位置指示器
+            update();
+            return;
         }
         
         // 通过 FenceManager 查找源围栏和图标
@@ -1115,6 +1318,7 @@ void FenceWindow::dropEvent(QDropEvent *event)
     }
     
     m_hovered = false;
+    m_showDropIndicator = false;  // 清除插入位置指示器
     update();
 }
 

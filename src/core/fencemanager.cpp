@@ -325,13 +325,9 @@ QPoint FenceManager::getNewFencePosition() const
 
 void FenceManager::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason)
 {
-    if (reason == QSystemTrayIcon::DoubleClick) {
-        if (m_fencesVisible) {
-            hideAllFences();
-        } else {
-            showAllFences();
-        }
-    }
+    Q_UNUSED(reason)
+    // 双击托盘图标不再切换围栏显示/隐藏，避免误操作
+    // 如需隐藏围栏，请使用右键菜单
 }
 
 void FenceManager::onFenceDeleteRequested(FenceWindow *fence)

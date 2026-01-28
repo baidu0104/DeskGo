@@ -65,6 +65,7 @@ protected:
     void showEvent(QShowEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -106,6 +107,11 @@ private:
     // 视觉效果
     bool m_hovered = false;
     QVariantAnimation *m_collapseAnimation = nullptr;
+    
+    // 拖拽插入位置指示器
+    bool m_showDropIndicator = false;
+    int m_dropIndicatorIndex = -1;
+    QRect m_dropIndicatorRect;
     
     // 标题编辑
     // 状态保存

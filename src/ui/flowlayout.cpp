@@ -25,6 +25,25 @@ void FlowLayout::addItem(QLayoutItem *item)
     m_itemList.append(item);
 }
 
+void FlowLayout::insertItem(int index, QLayoutItem *item)
+{
+    if (index < 0 || index > m_itemList.size()) {
+        m_itemList.append(item);
+    } else {
+        m_itemList.insert(index, item);
+    }
+}
+
+int FlowLayout::indexOf(QWidget *widget) const
+{
+    for (int i = 0; i < m_itemList.size(); ++i) {
+        if (m_itemList.at(i)->widget() == widget) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 int FlowLayout::horizontalSpacing() const
 {
     if (m_hSpace >= 0) {

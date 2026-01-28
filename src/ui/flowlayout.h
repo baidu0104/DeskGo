@@ -17,6 +17,8 @@ public:
     ~FlowLayout() override;
 
     void addItem(QLayoutItem *item) override;
+    void insertItem(int index, QLayoutItem *item);
+    int indexOf(QWidget *widget) const;
     int horizontalSpacing() const;
     int verticalSpacing() const;
     Qt::Orientations expandingDirections() const override;
