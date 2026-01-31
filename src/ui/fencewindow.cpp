@@ -29,6 +29,11 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
+
+// WM_MOUSEACTIVATE 返回值
+#ifndef MA_NOACTIVATE
+#define MA_NOACTIVATE 3
+#endif
 #endif
 
 #include <QtWin>
@@ -38,6 +43,133 @@
 void logToDesktop(const QString &msg) {
     Q_UNUSED(msg);
     // 调试日志已禁用
+}
+
+// 静态成员初始化
+HHOOK FenceWindow::s_hKeyboardHook = NULL;
+QSet<FenceWindow*> FenceWindow::s_allFences;
+HHOOK FenceWindow::s_hMouseHook = NULL;
+QPointer<FenceWindow> FenceWindow::s_editingFence;
+
+// 键盘钩子回调函数
+LRESULT CALLBACK FenceWindow::KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION) {
+        KBDLLHOOKSTRUCT *pKbdStruct = (KBDLLHOOKSTRUCT*)lParam;
+        
+        // 检测 Win+D 组合键
+        // D 键的虚拟键码是 0x44
+        if (pKbdStruct->vkCode == 0x44) { // D 键
+            // 检查 Win 键是否按下
+            if (GetAsyncKeyState(VK_LWIN) & 0x8000 || GetAsyncKeyState(VK_RWIN) & 0x8000) {
+                if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                    qDebug() << "[KeyboardProc] Win+D detected, manual handling...";
+                    
+                    static bool s_inShowDesktopMode = false;
+                    static QList<HWND> s_windowsToRestore;
+                    
+                    if (!s_inShowDesktopMode) {
+                        // 进入显示桌面模式：最小化除了围栏外的所有窗口
+                        s_windowsToRestore.clear();
+                        
+                        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                            // 跳过自己管理的围栏窗口
+                            for (FenceWindow* fence : s_allFences) {
+                                 if ((HWND)fence->winId() == hwnd) return TRUE;
+                            }
+                            
+                            // 跳过 Shell 核心窗口
+                            HWND hShellWnd = GetShellWindow();
+                            if (hwnd == hShellWnd) return TRUE;
+
+                            WCHAR className[256];
+                            GetClassName(hwnd, className, 256);
+                            if (wcscmp(className, L"Progman") == 0 || 
+                                wcscmp(className, L"WorkerW") == 0 || 
+                                wcscmp(className, L"Shell_TrayWnd") == 0 || 
+                                wcscmp(className, L"Shell_SecondaryTrayWnd") == 0) {
+                                return TRUE;
+                            }
+                            
+                            if (!IsIconic(hwnd) && IsWindowVisible(hwnd)) {
+                                 // 也是排除工具窗口
+                                 LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+                                 if ((exStyle & WS_EX_TOOLWINDOW) == 0) {
+                                     // 仅记录并最小化非工具窗口、可见的窗口
+                                     PostMessage(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+                                     
+                                     // 记录到列表中以便恢复
+                                     QList<HWND> *pList = reinterpret_cast<QList<HWND>*>(lParam);
+                                     if (pList) pList->append(hwnd);
+                                 }
+                            }
+                            return TRUE;
+                        }, (LPARAM)&s_windowsToRestore);
+
+                        s_inShowDesktopMode = true;
+                    } else {
+                        // 退出显示桌面模式：仅恢复我们之前最小化的窗口
+                        // 这解决了"恢复了莫名其妙的窗口"的问题
+                        
+                        for (HWND hwnd : s_windowsToRestore) {
+                            if (IsWindow(hwnd)) {
+                                // 仅恢复当前仍然是最小化状态的窗口
+                                // 如果用户在 ShowDesktop 模式下手动恢复了某个窗口，我们就不去动它
+                                if (IsIconic(hwnd)) {
+                                     PostMessage(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
+                                }
+                            }
+                        }
+                        
+                        s_windowsToRestore.clear();
+                        s_inShowDesktopMode = false;
+                    }
+                    
+                    // 拦截事件，不让系统处理
+                    return 1;
+                }
+            }
+        }
+    }
+    
+    // 继续传递其他按键事件
+    return CallNextHookEx(s_hKeyboardHook, nCode, wParam, lParam);
+}
+
+// 鼠标钩子回调函数
+LRESULT CALLBACK FenceWindow::MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION) {
+        // 使用 QPointer 检查对象是否仍然有效
+        if (!s_editingFence.isNull()) {
+            // 检测鼠标左键按下
+            if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+                MSLLHOOKSTRUCT *pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
+                
+                // 获取点击的全局位置
+                POINT pt = pMouseStruct->pt;
+                
+                // 使用 Windows API 获取窗口句柄和矩形
+                HWND hWnd = (HWND)s_editingFence->winId();
+                
+                // 验证窗口句柄是否有效
+                if (hWnd && IsWindow(hWnd)) {
+                    RECT rect;
+                    if (GetWindowRect(hWnd, &rect)) {
+                        // 检查点击是否在围栏窗口外部
+                        if (pt.x < rect.left || pt.x > rect.right || 
+                            pt.y < rect.top || pt.y > rect.bottom) {
+                            // 点击在围栏外部，通过信号通知主线程完成编辑
+                            QMetaObject::invokeMethod(s_editingFence.data(), "finishTitleEdit", Qt::QueuedConnection);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 继续传递鼠标事件
+    return CallNextHookEx(s_hMouseHook, nCode, wParam, lParam);
 }
 
 // 获取系统原生图标辅助函数
@@ -112,25 +244,75 @@ FenceWindow::FenceWindow(const QString &title, QWidget *parent)
     , m_id(QUuid::createUuid().toString(QUuid::WithoutBraces))
     , m_title(title)
 {
+    // 将当前窗口添加到全局集合
+    s_allFences.insert(this);
+    
+    // 如果是第一个窗口，安装键盘钩子
+    if (s_allFences.size() == 1 && s_hKeyboardHook == NULL) {
+#ifdef Q_OS_WIN
+        s_hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, GetModuleHandle(NULL), 0);
+        if (s_hKeyboardHook) {
+            qDebug() << "[FenceWindow] Keyboard hook installed successfully";
+        } else {
+            qDebug() << "[FenceWindow] Failed to install keyboard hook, error:" << GetLastError();
+        }
+#endif
+    }
+    
     // 初始化保存定时器 (防抖动) - 必须在 setupUi 之前，因为 setupUi 会触发 resizeEvent
     m_saveTimer = new QTimer(this);
     m_saveTimer->setSingleShot(true);
     m_saveTimer->setInterval(1000); // 1秒后保存
     connect(m_saveTimer, &QTimer::timeout, this, &FenceWindow::geometryChanged);
-
+    
+    // 在 setupUi 之前先隐藏窗口，防止在设置过程中显示
+    setVisible(false);
+    
     setupUi();
 }
 
 FenceWindow::~FenceWindow()
 {
+    m_isClosing = true;
+    
+    // 如果当前窗口正在编辑，清理鼠标钩子
+    if (s_editingFence.data() == this) {
+#ifdef Q_OS_WIN
+        if (s_hMouseHook) {
+            UnhookWindowsHookEx(s_hMouseHook);
+            s_hMouseHook = NULL;
+            qDebug() << "[~FenceWindow] Mouse hook uninstalled in destructor";
+        }
+#endif
+        s_editingFence.clear();
+    }
+    
+    // 从全局集合中移除
+    s_allFences.remove(this);
+    
+    // 如果是最后一个窗口，卸载键盘钩子
+    if (s_allFences.isEmpty() && s_hKeyboardHook != NULL) {
+#ifdef Q_OS_WIN
+        UnhookWindowsHookEx(s_hKeyboardHook);
+        s_hKeyboardHook = NULL;
+        qDebug() << "[~FenceWindow] Keyboard hook uninstalled";
+#endif
+    }
 }
 
 void FenceWindow::setupUi()
 {
-    // 设置窗口属性：无边框、置于桌面层、工具窗口（不在任务栏显示）
-    setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnBottomHint);
+    // 设置窗口属性
+#ifdef Q_OS_WIN
+    // 使用 Qt::Window 而不是 Qt::Tool，以便接收系统消息（如 WM_SYSCOMMAND）
+    // 配合 WS_EX_TOOLWINDOW 扩展样式可以不在任务栏显示
+    setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
+#else
+    setWindowFlags(Qt::FramelessWindowHint | Qt::Tool);
+#endif
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_DeleteOnClose);
+    setAttribute(Qt::WA_ShowWithoutActivating); // 显示时不抢焦点，防止遮挡当前活动窗口
     
     setMinimumSize(180, 60);
     resize(280, 200);
@@ -187,8 +369,34 @@ void FenceWindow::setupBlurEffect()
 
 void FenceWindow::showEvent(QShowEvent *event)
 {
+    // 保存当前几何位置，防止 setWindowToDesktop 或其他操作重置它
+    QRect geo = geometry();
+    
     QWidget::showEvent(event);
+    
+    // 只在第一次显示时调用 setWindowToDesktop
+    if (!m_desktopEmbedded) {
+        // 移除延迟，直接同步执行
+        // 任何延迟都会导致肉眼可见的"下沉"过程
+        
+        // 1. 先发制人，在逻辑处理前直接物理置底
+        HWND hWnd = (HWND)winId();
+        SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        
+        // 2. 执行桌面嵌入逻辑（初始化 Watchdog 等）
+        DesktopHelper::setWindowToDesktop(this);
+        m_desktopEmbedded = true;
+        
+        // 3. (已移除) 守护定时器不再需要，由 WM_WINDOWPOSCHANGING 拦截处理
+        
+        // 4. 发出信号
+        emit firstShowCompleted();
+    }
+    
     setupBlurEffect();
+    
+    // 强制恢复尺寸和位置，使用 QTimer 确保在窗口系统事件处理完后执行
+
 }
 
 void FenceWindow::resizeEvent(QResizeEvent *event)
@@ -341,6 +549,8 @@ void FenceWindow::addIcon(IconWidget *icon)
     m_contentLayout->update();
     m_contentArea->update();
     update();
+    
+    emit geometryChanged(); // 保存更改
 }
 
 void FenceWindow::removeIcon(IconWidget *icon)
@@ -408,6 +618,8 @@ QJsonObject FenceWindow::toJson() const
     obj["height"] = height();
     obj["collapsed"] = m_collapsed;
     obj["expandedHeight"] = m_expandedHeight;
+    // 不再保存 alwaysOnTop，因为我们已经通过键盘钩子解决了 Win+D 问题
+    // obj["alwaysOnTop"] = m_alwaysOnTop;
     
     QJsonArray iconsArray;
     for (IconWidget *icon : m_icons) {
@@ -446,7 +658,13 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
     if (w < 100) w = 280;
     if (h < 50) h = 200;
     
+    // 先设置正确的几何位置
     fence->setGeometry(x, y, w, h);
+    
+    // 关键：创建窗口句柄但不显示
+    // 这样可以让 setWindowToDesktop 工作，但窗口不会显示
+    fence->winId(); // 强制创建窗口句柄
+    
     if (json["collapsed"].toBool()) {
         // 如果保存时是折叠的，那么 json["height"] 是 32。
         // 我们不能用它作为展开高度，否则展开后还是 32。
@@ -468,6 +686,11 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
         fence->setMinimumHeight(64);
         fence->m_contentArea->setVisible(true);
     }
+    
+    // 不再恢复 alwaysOnTop 设置，因为我们已经通过键盘钩子解决了 Win+D 问题
+    // if (json.contains("alwaysOnTop") && json["alwaysOnTop"].toBool()) {
+    //     fence->m_alwaysOnTop = true;
+    // }
 
     // 恢复图标
     QJsonArray iconsArray = json["icons"].toArray();
@@ -508,6 +731,75 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
 {
 #ifdef Q_OS_WIN
     MSG *msg = static_cast<MSG*>(message);
+    
+    // 处理 WM_MOUSEACTIVATE 消息，防止点击时激活窗口
+    if (msg->message == WM_MOUSEACTIVATE) {
+        // 始终返回 MA_NOACTIVATE，不激活窗口但保留鼠标消息
+        // 即使在编辑标题时也不激活窗口，避免 Z-order 改变
+        *result = MA_NOACTIVATE;
+        return true;
+    }
+
+    // 拦截 WM_PARENTNOTIFY，防止子窗口（如菜单）创建/销毁时激活父窗口
+    if (msg->message == WM_PARENTNOTIFY) {
+        if (LOWORD(msg->wParam) == WM_CREATE || LOWORD(msg->wParam) == WM_DESTROY) {
+             // 不做任何处理，直接返回，避免默认处理可能带来的激活行为
+        }
+    }
+
+    // 拦截 WM_SYSCOMMAND，防止通过系统菜单或快捷键最小化
+    if (msg->message == WM_SYSCOMMAND) {
+        if ((msg->wParam & 0xFFF0) == SC_MINIMIZE) {
+            *result = 0;
+            return true;
+        }
+    }
+
+    // 拦截 WM_NCACTIVATE，防止非客户区（标题栏）显示为激活颜色
+    // 同时也阻止窗口状态变为 "Active"
+    if (msg->message == WM_NCACTIVATE) {
+        // 强制返回 TRUE，表示我们处理了该消息，并且保持非激活外观（wParam=FALSE 当我们不像让它激活时）
+        // 这里不管 wParam 是什么，都假装它是 FALSE（非激活），但实际上我们直接返回 true 跳过默认处理
+        // 如果想让它看起来总是非激活，可以忽略 wParam，直接调用 DefWindowProc(..., FALSE, ...)
+        // 但 Qt 可能会混淆。最简单的：
+        if (msg->wParam) {
+            *result = TRUE; // 告诉系统 "即使你想激活，我也画成非激活的样子"
+            return true; 
+        }
+    }
+    
+    // 键盘钩子已经在全局拦截 Win+D，这里不需要额外处理
+    
+    // 只记录 WM_SHOWWINDOW 消息（用于调试 Win+D）
+    // if (msg->message == WM_SHOWWINDOW) {
+    //     qDebug() << "[nativeEvent] WM_SHOWWINDOW wParam:" << msg->wParam << "lParam:" << msg->lParam;
+    // }
+    
+    // 拦截 WM_WINDOWPOSCHANGING 以防止闪烁和隐藏
+    if (msg->message == WM_WINDOWPOSCHANGING) {
+        // 只有在嵌入桌面模式且非置顶状态下才干预
+        if (m_desktopEmbedded && !m_alwaysOnTop) {
+            WINDOWPOS* pos = (WINDOWPOS*)msg->lParam;
+            
+            // 1. 防止隐藏 (Win+D 会尝试隐藏窗口)
+            if (pos->flags & SWP_HIDEWINDOW) {
+                pos->flags &= ~SWP_HIDEWINDOW;
+                pos->flags |= SWP_SHOWWINDOW;
+            }
+
+            // 2. 防止 Z 序上浮
+            // 如果试图改变 Z 序 (没有 SWP_NOZORDER)
+            if (!(pos->flags & SWP_NOZORDER)) {
+                // 如果试图将窗口放置在非底部的位置
+                if (pos->hwndInsertAfter != HWND_BOTTOM) {
+                    pos->hwndInsertAfter = HWND_BOTTOM;
+                }
+            }
+        }
+    }
+    
+
+    
     if (msg->message == WM_ERASEBKGND) {
         *result = 1;
         return true;
@@ -897,13 +1189,95 @@ void FenceWindow::leaveEvent(QEvent *event)
     QWidget::leaveEvent(event);
 }
 
+void FenceWindow::hideEvent(QHideEvent *event)
+{
+    // 如果不是正在关闭且不是用户主动隐藏，则阻止隐藏
+    if (!m_isClosing && !m_userHidden) {
+        event->ignore();
+        show(); // 强制保持显示
+    } else {
+        QWidget::hideEvent(event);
+    }
+}
+
+void FenceWindow::closeEvent(QCloseEvent *event)
+{
+    m_isClosing = true;
+    QWidget::closeEvent(event);
+}
+
+void FenceWindow::changeEvent(QEvent *event)
+{
+    // 拦截窗口状态变化，防止被最小化
+    if (event->type() == QEvent::WindowStateChange) {
+        if (windowState() & Qt::WindowMinimized) {
+            // 如果窗口被最小化，立即恢复正常状态
+            setWindowState(windowState() & ~Qt::WindowMinimized);
+            show(); // 确保窗口显示
+            event->ignore();
+            return;
+        }
+    }
+    QWidget::changeEvent(event);
+}
+
+void FenceWindow::setAlwaysOnTop(bool onTop)
+{
+    if (m_alwaysOnTop == onTop) return;
+    
+    m_alwaysOnTop = onTop;
+    
+#ifdef Q_OS_WIN
+    HWND hWnd = (HWND)winId();
+    
+    if (onTop) {
+        // 设置为始终置顶
+        SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, 
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    } else {
+        // 取消置顶，放回桌面图标层上面
+        HWND hProgman = FindWindow(L"Progman", NULL);
+        HWND hDefView = FindWindowEx(hProgman, NULL, L"SHELLDLL_DefView", NULL);
+        
+        if (!hDefView) {
+            HWND hWorkerW = NULL;
+            while ((hWorkerW = FindWindowEx(NULL, hWorkerW, L"WorkerW", NULL)) != NULL) {
+                 hDefView = FindWindowEx(hWorkerW, NULL, L"SHELLDLL_DefView", NULL);
+                 if (hDefView) break;
+            }
+        }
+        
+        HWND hListView = NULL;
+        if (hDefView) {
+            hListView = FindWindowEx(hDefView, NULL, L"SysListView32", NULL);
+        }
+        
+        if (hListView) {
+            SetWindowPos(hWnd, hListView, 0, 0, 0, 0, 
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        } else {
+            SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, 
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+#endif
+    
+    emit geometryChanged(); // 触发保存
+}
+
 void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
 {
-    QMenu menu(this);
-    menu.setAttribute(Qt::WA_TranslucentBackground);
-    menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    // 创建无父对象的菜单，防止菜单弹出时自动将父窗口带到顶层
+    // 同时也防止菜单关闭时焦点自动交还给父窗口导致其跳到顶层
+    QMenu *menu = new QMenu(nullptr);
+    // 移除 WA_DeleteOnClose，因为我们在 exec() 返回后手动 delete menu
+    // menu->setAttribute(Qt::WA_DeleteOnClose);
+    menu->setAttribute(Qt::WA_TranslucentBackground);
+    // 必须使用 Qt::Popup 标志，否则菜单在点击外部时无法自动关闭
+    // Qt::Popup 包含了 Qt::FramelessWindowHint
+    menu->setWindowFlags(Qt::Popup | Qt::NoDropShadowWindowHint | Qt::WindowStaysOnTopHint);
 
-    menu.setStyleSheet(R"(
+    menu->setStyleSheet(R"(
         QMenu {
             background-color: rgba(45, 45, 50, 230);
             border: 1px solid rgba(255, 255, 255, 0.1);
@@ -930,12 +1304,15 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
         }
     )");
 
-    QAction *renameAction = menu.addAction("重命名");
-    QAction *collapseAction = menu.addAction(m_collapsed ? "展开" : "折叠");
-    menu.addSeparator();
-    QAction *deleteAction = menu.addAction("删除围栏");
+    QAction *renameAction = menu->addAction("重命名");
+    QAction *collapseAction = menu->addAction(m_collapsed ? "展开" : "折叠");
+    
+    menu->addSeparator();
+    QAction *deleteAction = menu->addAction("删除围栏");
 
-    QAction *selected = menu.exec(event->globalPos());
+
+
+    QAction *selected = menu->exec(event->globalPos());
 
     if (selected == renameAction) {
         startTitleEdit();
@@ -944,7 +1321,21 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
     } else if (selected == deleteAction) {
         emit deleteRequested(this);
     }
+    
+    // 手动删除（虽然设置了 WA_DeleteOnClose，但 exec 是阻塞的，为了安全可以手动删，或者让它自生自灭）
+    // 由于是 exec() 阻塞调用，结束后 delete 是安全的
+    delete menu;
+
+    // 菜单关闭后，不需要强制切换焦点，让系统自然处理
+    // 强制切换到 Progman 可能会导致某些情况下焦点混乱
+    // #ifdef Q_OS_WIN
+    // HWND hProgman = FindWindow(L"Progman", NULL);
+    // if (hProgman) SetForegroundWindow(hProgman);
+    // #endif
 }
+
+
+
 
 void FenceWindow::dragEnterEvent(QDragEnterEvent *event)
 {
@@ -1349,19 +1740,50 @@ void FenceWindow::startTitleEdit()
     )");
     m_titleEdit->selectAll();
     m_titleEdit->show();
-    m_titleEdit->setFocus();
     m_titleEdit->raise();
+    
+    // 使用 Qt 的方式设置焦点，但不激活窗口
+    m_titleEdit->setFocus(Qt::MouseFocusReason);
     
     // 按 Enter 完成编辑
     connect(m_titleEdit, &QLineEdit::returnPressed, this, &FenceWindow::finishTitleEdit);
     
     // 安装事件过滤器处理 ESC 键和焦点丢失
     m_titleEdit->installEventFilter(this);
+    
+    // 安装全局事件过滤器，监听应用程序级别的鼠标点击
+    qApp->installEventFilter(this);
+    
+#ifdef Q_OS_WIN
+    // 安装鼠标钩子以检测桌面点击
+    if (!s_hMouseHook) {
+        s_editingFence = this;
+        s_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseProc, GetModuleHandle(NULL), 0);
+        if (s_hMouseHook) {
+            qDebug() << "[startTitleEdit] Mouse hook installed";
+        } else {
+            qDebug() << "[startTitleEdit] Failed to install mouse hook, error:" << GetLastError();
+        }
+    }
+#endif
 }
 
 void FenceWindow::finishTitleEdit()
 {
     if (!m_titleEdit) return;
+    
+    // 移除全局事件过滤器
+    qApp->removeEventFilter(this);
+    
+#ifdef Q_OS_WIN
+    // 卸载鼠标钩子
+    if (s_hMouseHook && s_editingFence.data() == this) {
+        UnhookWindowsHookEx(s_hMouseHook);
+        s_hMouseHook = NULL;
+        s_editingFence.clear();
+        qDebug() << "[finishTitleEdit] Mouse hook uninstalled";
+    }
+#endif
     
     // 获取新标题
     QString newTitle = m_titleEdit->text().trimmed();
@@ -1377,16 +1799,54 @@ void FenceWindow::finishTitleEdit()
     
     // 恢复标题标签的文字
     m_titleLabel->setText(m_title);
+    
+#ifdef Q_OS_WIN
+    // 编辑完成后，重新设置 Z-order
+    QTimer::singleShot(10, this, [this]() {
+        HWND hWnd = (HWND)winId();
+        
+        // 找到桌面图标层
+        HWND hProgman = FindWindow(L"Progman", NULL);
+        HWND hDefView = FindWindowEx(hProgman, NULL, L"SHELLDLL_DefView", NULL);
+        
+        if (!hDefView) {
+            HWND hWorkerW = NULL;
+            while ((hWorkerW = FindWindowEx(NULL, hWorkerW, L"WorkerW", NULL)) != NULL) {
+                 hDefView = FindWindowEx(hWorkerW, NULL, L"SHELLDLL_DefView", NULL);
+                 if (hDefView) break;
+            }
+        }
+        
+        HWND hListView = NULL;
+        if (hDefView) {
+            hListView = FindWindowEx(hDefView, NULL, L"SysListView32", NULL);
+        }
+        
+        if (hListView) {
+            // 先降到最底层
+            SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, 
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            
+            // 然后提升到桌面图标上方
+            SetWindowPos(hWnd, hListView, 0, 0, 0, 0, 
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            
+            qDebug() << "[finishTitleEdit] Z-order reset after editing";
+        }
+    });
+#endif
 }
 
 bool FenceWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // 只处理当前窗口及其子控件的事件
     if (event->type() == QEvent::MouseMove) {
         // 如果正在调整大小或拖拽，不需要额外处理光标，交由 mouseMoveEvent 处理
         if (!m_isResizing && !m_isDragging) {
             QMouseEvent *mouseEvent = static_cast<QMouseEvent*>(event);
             QWidget *widget = qobject_cast<QWidget*>(watched);
-            if (widget) {
+            // 只处理当前窗口的子控件
+            if (widget && widget->window() == this) {
                 // 将子控件坐标转换为窗口坐标
                 QPoint pos = widget->mapTo(this, mouseEvent->pos());
                 
@@ -1432,10 +1892,21 @@ bool FenceWindow::eventFilter(QObject *watched, QEvent *event)
         if (event->type() == QEvent::KeyPress) {
             QKeyEvent *keyEvent = static_cast<QKeyEvent*>(event);
             if (keyEvent->key() == Qt::Key_Escape) {
+#ifdef Q_OS_WIN
+                // 卸载鼠标钩子
+                if (s_hMouseHook && s_editingFence.data() == this) {
+                    UnhookWindowsHookEx(s_hMouseHook);
+                    s_hMouseHook = NULL;
+                    s_editingFence.clear();
+                }
+#endif
                 m_titleEdit->removeEventFilter(this);
                 m_titleEdit->deleteLater();
                 m_titleEdit = nullptr;
                 m_titleLabel->setText(m_title);  // 恢复原标题
+                
+                // 移除全局事件过滤器
+                qApp->removeEventFilter(this);
                 return true;
             }
         }

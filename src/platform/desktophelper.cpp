@@ -1,4 +1,5 @@
 #include "desktophelper.h"
+#include <QWidget>
 #include <windows.h>
 #include <commctrl.h>
 #include <QDebug>
@@ -300,4 +301,118 @@ void DesktopHelper::notifyFileAdded(const QString &filePath)
     // 通知系统特定文件被添加
     QString nativePath = QDir::toNativeSeparators(filePath);
     SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, nativePath.toStdWString().c_str(), NULL);
+}
+
+// 全局变量用于在回调中传递数据（也可以用 lParam 传结构体指针，这里为了简单直接用 static）
+static HWND g_hDefViewContainer = NULL;
+static HWND g_hWorkerW = NULL;
+
+// 步骤1：查找包含 SHELLDLL_DefView 的窗口
+static BOOL CALLBACK EnumFindDefViewContainer(HWND hwnd, LPARAM lParam)
+{
+    if (FindWindowEx(hwnd, NULL, L"SHELLDLL_DefView", NULL) != NULL) {
+        g_hDefViewContainer = hwnd;
+        return FALSE; // 找到了，停止
+    }
+    return TRUE;
+}
+
+// 步骤2：查找 WorkerW，且不是 DefViewContainer
+static BOOL CALLBACK EnumFindTargetWorkerW(HWND hwnd, LPARAM lParam)
+{
+    WCHAR className[256];
+    GetClassName(hwnd, className, 256);
+    
+    if (wcscmp(className, L"WorkerW") == 0) {
+        // 找到了一个 WorkerW
+        // 只要不是存放图标的那个窗口就可能是背景层
+        // 注意：移除 IsWindowVisible 检查，因为有时它是隐藏的
+        if (hwnd != g_hDefViewContainer) {
+            g_hWorkerW = hwnd;
+            return FALSE; // 找到了目标
+        }
+    }
+    return TRUE;
+}
+
+void DesktopHelper::setWindowToDesktop(QWidget *widget)
+{
+#ifdef Q_OS_WIN
+    if (!widget) return;
+    
+    if (!widget->testAttribute(Qt::WA_WState_Created)) {
+        widget->createWinId();
+    }
+    
+    HWND hWnd = (HWND)widget->winId();
+    
+    qDebug() << "[setWindowToDesktop] Setting up desktop window";
+    
+    // 策略：使用 WS_POPUP 窗口，不设置父窗口
+    // 通过 Z-order 放置在桌面图标层上方
+    
+    // 1. 确保是 WS_POPUP 样式（不是 WS_CHILD）
+    // 之前尝试 WS_OVERLAPPED 但效果不佳，回退到标准的 POPUP
+    LONG_PTR style = GetWindowLongPtr(hWnd, GWL_STYLE);
+    style &= ~WS_CHILD;
+    style &= ~WS_OVERLAPPED;
+    style |= WS_POPUP;
+    SetWindowLongPtr(hWnd, GWL_STYLE, style);
+    
+    // 2. 设置扩展样式
+    LONG_PTR exStyle = GetWindowLongPtr(hWnd, GWL_EXSTYLE);
+    exStyle |= WS_EX_NOACTIVATE;   // 不激活
+    exStyle |= WS_EX_TOOLWINDOW;   // 工具窗口
+    exStyle &= ~WS_EX_APPWINDOW;   // 不在任务栏
+    SetWindowLongPtr(hWnd, GWL_EXSTYLE, exStyle);
+    
+    // 3. 找到桌面图标层
+    HWND hProgman = FindWindow(L"Progman", NULL);
+    HWND hDefView = FindWindowEx(hProgman, NULL, L"SHELLDLL_DefView", NULL);
+    
+    if (!hDefView) {
+        HWND hWorkerW = NULL;
+        while ((hWorkerW = FindWindowEx(NULL, hWorkerW, L"WorkerW", NULL)) != NULL) {
+             hDefView = FindWindowEx(hWorkerW, NULL, L"SHELLDLL_DefView", NULL);
+             if (hDefView) break;
+        }
+    }
+    
+    HWND hListView = NULL;
+    if (hDefView) {
+        hListView = FindWindowEx(hDefView, NULL, L"SysListView32", NULL);
+    }
+    
+    // 4. 回退到稳健的 Owner 策略
+    // SetParent 方案导致窗口不可见（Qt 子窗口机制冲突），因此我们采用 "Owner + 周期性 Z-Order 检查" 的混合策略
+    
+    // (样式已在上方步骤1设置为 WS_POPUP，无需重复设置)
+
+    // 2. 尝试设置 Owner
+    // 移除 Owner 设置：因为在某些系统上 Owner=Progman + HWND_BOTTOM 会导致不可见
+    // 而 Owner=Progman + HWND_NOTOPMOST 又会导致置顶
+    // 所以我们尝试"无 Owner + 强力置底"策略
+    /*
+    HWND hOwner = NULL;
+    if (hDefView) hOwner = GetParent(hDefView);
+    if (!hOwner) hOwner = FindWindow(L"Progman", NULL);
+
+    if (hOwner) {
+        qDebug() << "[setWindowToDesktop] Setting owner to:" << hOwner;
+        SetLastError(0);
+        SetWindowLongPtr(hWnd, GWLP_HWNDPARENT, (LONG_PTR)hOwner);
+    }
+    */
+    qDebug() << "[setWindowToDesktop] Skipped Owner setting to avoid visibility issues.";
+    
+    // 3. 初始 Z-Order 设置
+    SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, 
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+    
+    qDebug() << "[setWindowToDesktop] Setup complete (Owner Attempted).";
+#else
+    Q_UNUSED(widget);
+#endif
 }

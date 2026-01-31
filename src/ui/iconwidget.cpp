@@ -9,7 +9,12 @@
 #include <QMenu>
 #include <QStyle>
 #include <QDebug>
+#include <QTimer>
 #include "../platform/blurhelper.h"
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 IconWidget::IconWidget(const IconData &data, QWidget *parent)
     : QWidget(parent)
@@ -158,6 +163,45 @@ void IconWidget::mouseReleaseEvent(QMouseEvent *event)
             // 打开文件/快捷方式
             if (!m_data.path.isEmpty()) {
                 QDesktopServices::openUrl(QUrl::fromLocalFile(m_data.path));
+                
+                // 打开文件后，立即重置父窗口的 Z-order
+#ifdef Q_OS_WIN
+                QWidget *parentWidget = window();
+                if (parentWidget) {
+                    QTimer::singleShot(10, parentWidget, [parentWidget]() {
+                        HWND hWnd = (HWND)parentWidget->winId();
+                        
+                        // 找到桌面图标层
+                        HWND hProgman = FindWindow(L"Progman", NULL);
+                        HWND hDefView = FindWindowEx(hProgman, NULL, L"SHELLDLL_DefView", NULL);
+                        
+                        if (!hDefView) {
+                            HWND hWorkerW = NULL;
+                            while ((hWorkerW = FindWindowEx(NULL, hWorkerW, L"WorkerW", NULL)) != NULL) {
+                                 hDefView = FindWindowEx(hWorkerW, NULL, L"SHELLDLL_DefView", NULL);
+                                 if (hDefView) break;
+                            }
+                        }
+                        
+                        HWND hListView = NULL;
+                        if (hDefView) {
+                            hListView = FindWindowEx(hDefView, NULL, L"SysListView32", NULL);
+                        }
+                        
+                        if (hListView) {
+                            // 先降到最底层
+                            SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, 
+                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                            
+                            // 然后提升到桌面图标上方
+                            SetWindowPos(hWnd, hListView, 0, 0, 0, 0, 
+                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                            
+                            qDebug() << "[IconWidget] Z-order reset after opening file";
+                        }
+                    });
+                }
+#endif
             }
             emit doubleClicked(); // 仍然发出这个信号以防外部使用，或者可以改名为 clicked
         }

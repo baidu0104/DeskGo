@@ -8,8 +8,13 @@
 #include <QPropertyAnimation>
 #include <QUuid>
 #include <QTimer>
+#include <QPointer>
 #include <QMoveEvent>
 #include <QResizeEvent>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 class IconWidget;
 
@@ -39,6 +44,19 @@ public:
     void removeIcon(IconWidget *icon);
     void restoreAllIcons();
     QList<IconWidget*> icons() const;
+    
+    // 标记窗口已经嵌入桌面
+    void setDesktopEmbedded(bool embedded) { m_desktopEmbedded = embedded; }
+    
+    // 设置用户主动隐藏标志
+    void setUserHidden(bool hidden) { m_userHidden = hidden; }
+    
+    // 设置正在调整 Z-order 标志
+    void setAdjustingZOrder(bool adjusting) { m_isAdjustingZOrder = adjusting; }
+    
+    // 设置始终置顶模式
+    void setAlwaysOnTop(bool onTop);
+    bool isAlwaysOnTop() const { return m_alwaysOnTop; }
 
     // 序列化
     QJsonObject toJson() const;
@@ -49,6 +67,10 @@ signals:
     void titleChanged(const QString &title);
     void deleteRequested(FenceWindow *fence);
     void geometryChanged();
+    void firstShowCompleted(); // 首次显示完成信号
+
+public slots:
+    void finishTitleEdit();
 
 protected:
     bool nativeEvent(const QByteArray &eventType, void *message, long *result) override;
@@ -63,6 +85,9 @@ protected:
     void leaveEvent(QEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dragLeaveEvent(QDragLeaveEvent *event) override;
@@ -108,6 +133,31 @@ private:
     bool m_hovered = false;
     QVariantAnimation *m_collapseAnimation = nullptr;
     
+    // 桌面嵌入状态
+    bool m_desktopEmbedded = false;
+    
+    // 键盘钩子句柄
+    static HHOOK s_hKeyboardHook;
+    static QSet<FenceWindow*> s_allFences; // 所有围栏窗口的集合
+    
+    // 鼠标钩子（用于标题编辑时检测外部点击）
+    static HHOOK s_hMouseHook;
+    static QPointer<FenceWindow> s_editingFence; // 使用 QPointer 自动处理对象删除
+    
+    // 恢复定时器：Win+D 后自动恢复
+    QTimer *m_restoreTimer = nullptr;
+    
+    bool m_userHidden = false; // 用户主动隐藏
+    bool m_isClosing = false; // 程序正在关闭
+    bool m_alwaysOnTop = false; // 始终置顶模式（默认关闭，不遮挡其他窗口）
+    bool m_isAdjustingZOrder = false; // 正在调整 Z-order，避免触发 nativeEvent 的干扰
+    
+    // 键盘钩子回调函数
+    static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+    
+    // 鼠标钩子回调函数
+    static LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam);
+    
     // 拖拽插入位置指示器
     bool m_showDropIndicator = false;
     int m_dropIndicatorIndex = -1;
@@ -116,9 +166,7 @@ private:
     // 标题编辑
     // 状态保存
     QTimer *m_saveTimer;
-
     void startTitleEdit();
-    void finishTitleEdit();
 };
 
 #endif // FENCEWINDOW_H

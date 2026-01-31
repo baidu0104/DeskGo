@@ -1,6 +1,7 @@
 #include "fencemanager.h"
 #include "../ui/fencewindow.h"
 #include "configmanager.h"
+#include "../platform/desktophelper.h"
 
 #include <QApplication>
 #include <QScreen>
@@ -39,11 +40,6 @@ void FenceManager::initialize()
 {
     setupTrayIcon();
     loadFences();
-    
-    // 如果没有围栏，创建一个默认的
-    if (m_fences.isEmpty()) {
-        createFence("示例围栏");
-    }
     
     showAllFences();
 }
@@ -275,6 +271,12 @@ void FenceManager::loadFences()
         qDebug() << "Loaded fence:" << fence->title() 
                  << "Geometry:" << fence->geometry() 
                  << "JSON:" << fenceObj["x"].toInt() << fenceObj["y"].toInt();
+
+        // 预防坐标为 (0,0) 的情况（可能是保存失败或错误的初值）
+        if (fence->x() == 0 && fence->y() == 0) {
+            fence->move(getNewFencePosition());
+            saveFences(); // 保存修正后的位置
+        }
         
         // 关键：恢复时同样要设置图标
         if (m_trayIcon) {
@@ -290,6 +292,11 @@ void FenceManager::loadFences()
         connect(fence, &FenceWindow::collapsedChanged,
                 this, &FenceManager::saveFences);
         
+        // 连接首次显示完成信号
+        connect(fence, &FenceWindow::firstShowCompleted, this, [this, fence]() {
+            qDebug() << "[FenceManager] First show completed for:" << fence->title();
+        });
+        
         m_fences.append(fence);
     }
 }
@@ -297,6 +304,7 @@ void FenceManager::loadFences()
 void FenceManager::showAllFences()
 {
     for (FenceWindow *fence : m_fences) {
+        fence->setUserHidden(false);
         fence->show();
     }
     m_fencesVisible = true;
@@ -305,6 +313,7 @@ void FenceManager::showAllFences()
 void FenceManager::hideAllFences()
 {
     for (FenceWindow *fence : m_fences) {
+        fence->setUserHidden(true);
         fence->hide();
     }
     m_fencesVisible = false;

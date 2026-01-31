@@ -4,6 +4,8 @@
 #include <QString>
 #include <QPoint>
 
+class QWidget;
+
 class DesktopHelper
 {
 public:
@@ -24,6 +26,9 @@ public:
     
     // 通知特定文件被添加
     static void notifyFileAdded(const QString &filePath);
+
+    // 将窗口设置为桌面子窗口（防止 Win+D 最小化）
+    static void setWindowToDesktop(QWidget *widget);
 };
 
 #endif // DESKTOPHELPER_H

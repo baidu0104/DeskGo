@@ -48,11 +48,13 @@ signals:
 
 private:
     explicit ConfigManager(QObject *parent = nullptr);
-    ~ConfigManager() = default;
+    ~ConfigManager();
 
     void updateAutoStartRegistry(bool enabled);
 
-    QSettings m_settings;
+    QSettings *m_settings;
+    QString m_settingsPath;
+    QString m_fencesPath;
     
     bool m_autoStart = false;
     bool m_minimizeToTray = true;

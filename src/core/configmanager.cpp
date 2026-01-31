@@ -17,9 +17,24 @@ ConfigManager* ConfigManager::instance()
 
 ConfigManager::ConfigManager(QObject *parent)
     : QObject(parent)
-    , m_settings(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
+    , m_settings(nullptr)
 {
+    QString configPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configPath);
+    m_settingsPath = configPath + "/user_settings.ini";
+    m_fencesPath = configPath + "/fencing_config.json";
+    
+    m_settings = new QSettings(m_settingsPath, QSettings::IniFormat, this);
+    
     load();
+}
+
+ConfigManager::~ConfigManager()
+{
+    // QSettings is a QObject, so it will be deleted when its parent (this) is deleted.
+    // No explicit delete m_settings; needed if 'this' is the parent.
+    // If 'this' is not the parent, then delete m_settings; would be required.
+    // In this case, 'this' is the parent, so it's handled.
 }
 
 bool ConfigManager::autoStart() const
@@ -97,20 +112,17 @@ void ConfigManager::setFencesData(const QJsonObject &data)
 
 void ConfigManager::save()
 {
-    m_settings.setValue("General/AutoStart", m_autoStart);
-    m_settings.setValue("General/MinimizeToTray", m_minimizeToTray);
-    m_settings.setValue("General/Theme", m_theme);
+    if (!m_settings) return;
 
-    m_settings.setValue("Window/Geometry", m_windowGeometry);
-    m_settings.setValue("Window/Maximized", m_windowMaximized);
+    m_settings->setValue("General/AutoStart", m_autoStart);
+    m_settings->setValue("General/MinimizeToTray", m_minimizeToTray);
+    m_settings->setValue("General/Theme", m_theme);
+
+    m_settings->setValue("Window/Geometry", m_windowGeometry);
+    m_settings->setValue("Window/Maximized", m_windowMaximized);
 
     // 保存围栏数据到JSON文件
-    // 保存围栏数据到JSON文件
-    QString dataPath = QCoreApplication::applicationDirPath();
-    // QDir().mkpath(dataPath); // 程序目录肯定存在
-    QString filePath = dataPath + "/fences.json";
-
-    QFile file(filePath);
+    QFile file(m_fencesPath);
     if (file.open(QIODevice::WriteOnly)) {
         QJsonDocument doc(m_fencesData);
         file.write(doc.toJson(QJsonDocument::Indented));
@@ -120,19 +132,17 @@ void ConfigManager::save()
 
 void ConfigManager::load()
 {
-    m_autoStart = m_settings.value("General/AutoStart", false).toBool();
-    m_minimizeToTray = m_settings.value("General/MinimizeToTray", true).toBool();
-    m_theme = m_settings.value("General/Theme", "dark").toString();
+    if (!m_settings) return;
 
-    m_windowGeometry = m_settings.value("Window/Geometry", QRect()).toRect();
-    m_windowMaximized = m_settings.value("Window/Maximized", false).toBool();
+    m_autoStart = m_settings->value("General/AutoStart", false).toBool();
+    m_minimizeToTray = m_settings->value("General/MinimizeToTray", true).toBool();
+    m_theme = m_settings->value("General/Theme", "dark").toString();
+
+    m_windowGeometry = m_settings->value("Window/Geometry", QRect()).toRect();
+    m_windowMaximized = m_settings->value("Window/Maximized", false).toBool();
 
     // 加载围栏数据
-    // 加载围栏数据
-    QString dataPath = QCoreApplication::applicationDirPath();
-    QString filePath = dataPath + "/fences.json";
-
-    QFile file(filePath);
+    QFile file(m_fencesPath);
     if (file.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
         m_fencesData = doc.object();
