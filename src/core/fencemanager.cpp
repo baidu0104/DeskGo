@@ -2,6 +2,7 @@
 #include "../ui/fencewindow.h"
 #include "configmanager.h"
 #include "../platform/desktophelper.h"
+#include "../platform/blurhelper.h"
 
 #include <QApplication>
 #include <QScreen>
@@ -17,6 +18,11 @@
 #include <QLabel>
 #include <QEvent>
 #include <QMouseEvent>
+#include <QTimer>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 FenceManager* FenceManager::instance()
 {
@@ -105,23 +111,30 @@ void FenceManager::setupTrayIcon()
     
     m_trayMenu = new QMenu();
     m_trayMenu->setAttribute(Qt::WA_TranslucentBackground);
+    m_trayMenu->setAttribute(Qt::WA_NoSystemBackground);
+    // 给边框留出 1px 的边距，防止边缘毛刺
+    m_trayMenu->setContentsMargins(1, 1, 1, 1);
+    
+    m_trayMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    
     m_trayMenu->setStyleSheet(R"(
         QMenu {
-            background: rgba(43, 43, 48, 250); /* 提高透明度，改善文字抗锯齿 */
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            background-color: rgba(45, 45, 50, 240);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 12px;
             padding: 8px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
         }
         QMenu::item {
+            background: transparent;
             color: #ffffff;
-            font-size: 13px;
-            font-weight: bold;
-            font-family: "Microsoft YaHei", "Segoe UI";
-            padding: 8px 30px;
+            padding: 6px 16px;
             border-radius: 6px;
+            margin: 2px 4px;
         }
         QMenu::item:selected {
-            background: rgba(255, 255, 255, 0.15);
+            background-color: rgba(255, 255, 255, 0.1);
         }
         QLabel#menuItemLabel {
             color: #ffffff;
@@ -132,7 +145,7 @@ void FenceManager::setupTrayIcon()
             font-family: "Microsoft YaHei", "Segoe UI";
         }
         QLabel#menuItemLabel:hover {
-            background: rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.1);
         }
         QMenu::separator {
             height: 1px;
@@ -140,6 +153,21 @@ void FenceManager::setupTrayIcon()
             margin: 6px 12px;
         }
     )");
+
+#ifdef Q_OS_WIN
+    connect(m_trayMenu, &QMenu::aboutToShow, this, [this]() {
+        QTimer::singleShot(10, this, [this]() {
+            if (!m_trayMenu) return;
+            // 物理裁剪圆角 (解决黑点问题)
+            BlurHelper::enableRoundedCorners(m_trayMenu, 12);
+            
+            HWND hMenu = (HWND)m_trayMenu->winId();
+            if (hMenu) {
+                SetForegroundWindow(hMenu);
+            }
+        });
+    });
+#endif
 
     auto addCenteredAction = [this](const QString &text, const std::function<void()> &callback) {
         QWidgetAction *action = new QWidgetAction(m_trayMenu);
@@ -164,7 +192,7 @@ void FenceManager::setupTrayIcon()
     m_trayMenu->addSeparator();
 
     // 修复标准项颜色并尽量通过空格平衡视觉
-    QAction *autoStartAction = m_trayMenu->addAction("        开机自启动        ");
+    QAction *autoStartAction = m_trayMenu->addAction("开机自启动");
     autoStartAction->setCheckable(true);
     autoStartAction->setChecked(ConfigManager::instance()->autoStart());
     connect(autoStartAction, &QAction::toggled, [](bool checked) {

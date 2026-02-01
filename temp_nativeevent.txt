@@ -1,0 +1,13 @@
+bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *result)
+{
+#ifdef Q_OS_WIN
+    MSG *msg = static_cast<MSG*>(message);
+    
+    if (msg->message == WM_ERASEBKGND) {
+        *result = 1;
+        return true;
+    }
+
+    if (msg->message == WM_NCHITTEST) {
+        // 窗口调整大小和拖动的逻辑保持不变
+        // （这部分代码很长，保持原样）

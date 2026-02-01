@@ -12,6 +12,11 @@
 #include <QJsonArray>
 #include <QMessageBox>
 #include <QStyle>
+#include <QTimer>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 MainWindow::MainWindow(QWidget *parent)
     : QWidget(parent)
@@ -169,27 +174,34 @@ void MainWindow::setupTrayIcon()
     }
 
     m_trayMenu = new QMenu(this);
+    // 启用透明背景
     m_trayMenu->setAttribute(Qt::WA_TranslucentBackground);
-    m_trayMenu->setWindowFlags(m_trayMenu->windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    m_trayMenu->setAttribute(Qt::WA_NoSystemBackground);
+    // 给边框留出 1px 的边距，防止边缘毛刺
+    m_trayMenu->setContentsMargins(1, 1, 1, 1);
     
-    // 启用毛玻璃效果
-    BlurHelper::enableBlur(m_trayMenu, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
-    BlurHelper::enableRoundedCorners(m_trayMenu);
-
+    // 使用标准 Popup
+    m_trayMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    
+    // 半透明背景及样式
     m_trayMenu->setStyleSheet(R"(
         QMenu {
-            background: rgba(30, 30, 35, 10);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background-color: rgba(45, 45, 50, 240);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
             padding: 4px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
         }
         QMenu::item {
+            background: transparent;
             color: #ffffff;
-            padding: 8px 32px 8px 16px;
+            padding: 6px 16px;
             border-radius: 4px;
+            margin: 2px 4px;
         }
         QMenu::item:selected {
-            background: rgba(255, 255, 255, 0.1);
+            background-color: rgba(255, 255, 255, 0.1);
         }
         QMenu::separator {
             height: 1px;
@@ -197,6 +209,25 @@ void MainWindow::setupTrayIcon()
             margin: 4px 8px;
         }
     )");
+
+#ifdef Q_OS_WIN
+    connect(m_trayMenu, &QMenu::aboutToShow, this, [this]() {
+        // 延迟处理以确保窗口句柄已创建
+        QTimer::singleShot(10, this, [this]() {
+            if (!m_trayMenu) return;
+
+            // 1. 物理裁剪圆角 (解决黑点问题)
+            BlurHelper::enableRoundedCorners(m_trayMenu, 8);
+            
+            // 也是为了解决托盘菜单点击外部不消失的经典 Bug
+            // 确保菜单窗口（或其拥有者）在前台
+            HWND hMenu = (HWND)m_trayMenu->winId();
+            if (hMenu) {
+                SetForegroundWindow(hMenu);
+            }
+        });
+    });
+#endif
 
     QAction *showAction = m_trayMenu->addAction("显示主窗口");
     connect(showAction, &QAction::triggered, this, [this]() {
@@ -407,14 +438,33 @@ void MainWindow::onSettingsRequested()
 {
     // 简易设置菜单
     QMenu menu(this);
+    // 启用透明背景
     menu.setAttribute(Qt::WA_TranslucentBackground);
-    menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    menu.setAttribute(Qt::WA_NoSystemBackground);
+    // 给边框留出 1px 的边距，防止边缘毛刺
+    menu.setContentsMargins(1, 1, 1, 1);
     
-    // 启用毛玻璃效果
-    BlurHelper::enableBlur(&menu, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
-    BlurHelper::enableRoundedCorners(&menu);
-
+    // 使用标准 Popup
+    menu.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    
+    // 复用样式
     menu.setStyleSheet(m_trayMenu->styleSheet());
+
+#ifdef Q_OS_WIN
+    connect(&menu, &QMenu::aboutToShow, this, [this, &menu]() {
+        // 延迟处理
+        QTimer::singleShot(10, this, [this, &menu]() {
+            // 1. 物理裁剪圆角 (解决黑点问题)
+            BlurHelper::enableRoundedCorners(&menu, 8);
+            
+            // 确保能点击外部关闭
+            HWND hMenu = (HWND)menu.winId();
+            if (hMenu) {
+                SetForegroundWindow(hMenu);
+            }
+        });
+    });
+#endif
 
     QAction *autoStartAction = menu.addAction("开机自启动");
     autoStartAction->setCheckable(true);

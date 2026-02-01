@@ -7,7 +7,12 @@
 #include <QInputDialog>
 #include <QMimeData>
 #include <QDrag>
+#include <QTimer>
 #include "../platform/blurhelper.h"
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 FenceWidget::FenceWidget(const QString &title, QWidget *parent)
     : QWidget(parent)
@@ -316,27 +321,40 @@ void FenceWidget::dropEvent(QDropEvent *event)
 void FenceWidget::contextMenuEvent(QContextMenuEvent *event)
 {
     QMenu menu(this);
+    // 启用透明背景，让 Qt 绘制抗锯齿圆角
     menu.setAttribute(Qt::WA_TranslucentBackground);
-    menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    menu.setAttribute(Qt::WA_NoSystemBackground);
+    // 给边框留出 1px 的边距，防止边缘毛刺
+    menu.setContentsMargins(1, 1, 1, 1);
     
-    // 启用毛玻璃效果
-    BlurHelper::enableBlur(&menu, QColor(30, 30, 35, 160), BlurHelper::Acrylic);
-    BlurHelper::enableRoundedCorners(&menu);
-
+    // 使用 standard Popup
+    menu.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    
+    // 使用半透明背景 (rgba)，Qt 会自动处理抗锯齿圆角
     menu.setStyleSheet(R"(
         QMenu {
-            background: rgba(30, 30, 35, 10);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background-color: rgba(45, 45, 50, 240);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
             padding: 4px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
         }
         QMenu::item {
+            background: transparent;
             color: #ffffff;
-            padding: 8px 24px;
+            padding: 5px 16px;
+            min-height: 20px;
             border-radius: 4px;
+            margin: 2px 4px;
         }
         QMenu::item:selected {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        QMenu::separator {
+            height: 1px;
             background: rgba(255, 255, 255, 0.1);
+            margin: 4px 8px;
         }
     )");
 
@@ -344,6 +362,35 @@ void FenceWidget::contextMenuEvent(QContextMenuEvent *event)
     QAction *collapseAction = menu.addAction(m_collapsed ? "展开" : "折叠");
     menu.addSeparator();
     QAction *deleteAction = menu.addAction("删除围栏");
+
+#ifdef Q_OS_WIN
+    connect(&menu, &QMenu::aboutToShow, this, [this, &menu]() {
+        QTimer::singleShot(10, this, [this, &menu]() {
+            HWND hMenu = (HWND)menu.winId();
+            // 获取所在的顶层窗口（即 FenceWindow）的句柄
+            HWND hFence = (HWND)window()->winId();
+            
+            // 0. 裁剪圆角 (解决黑点问题)
+            BlurHelper::enableRoundedCorners(&menu, 8);
+            
+            // 1. 移除 TOPMOST
+            LONG_PTR exStyle = GetWindowLongPtr(hMenu, GWL_EXSTYLE);
+            if (exStyle & WS_EX_TOPMOST) {
+                SetWindowLongPtr(hMenu, GWL_EXSTYLE, exStyle & ~WS_EX_TOPMOST);
+            }
+            
+            // 2. 调整 Z-order 到围栏上方
+            HWND hPrev = GetWindow(hFence, GW_HWNDPREV);
+            UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED;
+            
+            if (hPrev) {
+                SetWindowPos(hMenu, hPrev, 0, 0, 0, 0, flags);
+            } else {
+                SetWindowPos(hMenu, HWND_TOP, 0, 0, 0, 0, flags);
+            }
+        });
+    });
+#endif
 
     QAction *selected = menu.exec(event->globalPos());
 

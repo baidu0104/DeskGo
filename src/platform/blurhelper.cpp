@@ -187,7 +187,8 @@ void BlurHelper::enableRoundedCorners(QWidget *widget, int radius)
         int h = rect.bottom - rect.top;
         // 注意：CreateRoundRectRgn 的坐标是 (x1, y1, x2, y2)，其中 x2 和 y2 是不包含的边界
         // 所以 x2 应该设为 w，y2 应该设为 h，这样有效区域是 0 到 w-1，0 到 h-1
-        HRGN hRgn = CreateRoundRectRgn(0, 0, w, h, radius, radius);
+        // 注意：最后的两个参数是椭圆的宽和高（直径），所以需要将半径 * 2
+        HRGN hRgn = CreateRoundRectRgn(0, 0, w, h, radius * 2, radius * 2);
         SetWindowRgn(hwnd, hRgn, TRUE);
         // 注意：SetWindowRgn 会接管 hRgn 的所有权，不需要手动删除
     }

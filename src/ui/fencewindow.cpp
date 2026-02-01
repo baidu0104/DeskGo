@@ -340,6 +340,7 @@ void FenceWindow::setupUi()
             padding: 0 10px;
         }
     )");
+    m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     mainLayout->addWidget(m_titleLabel);
 
     // 内容区域
@@ -351,8 +352,6 @@ void FenceWindow::setupUi()
     // 折叠动画将在 setCollapsed 中按需创建
     
     // 启用鼠标追踪并安装事件过滤器，以便在子控件上悬浮时也能更新光标
-    m_titleLabel->setMouseTracking(true);
-    m_titleLabel->installEventFilter(this);
     m_contentArea->setMouseTracking(true);
     m_contentArea->installEventFilter(this);
 }
@@ -1267,19 +1266,21 @@ void FenceWindow::setAlwaysOnTop(bool onTop)
 
 void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
 {
-    // 创建无父对象的菜单，防止菜单弹出时自动将父窗口带到顶层
-    // 同时也防止菜单关闭时焦点自动交还给父窗口导致其跳到顶层
-    QMenu *menu = new QMenu(nullptr);
-    // 移除 WA_DeleteOnClose，因为我们在 exec() 返回后手动 delete menu
-    // menu->setAttribute(Qt::WA_DeleteOnClose);
+    QMenu *menu = new QMenu(this);
+    // 启用透明背景，让 Qt 绘制抗锯齿圆角
     menu->setAttribute(Qt::WA_TranslucentBackground);
-    // 必须使用 Qt::Popup 标志，否则菜单在点击外部时无法自动关闭
-    // Qt::Popup 包含了 Qt::FramelessWindowHint
-    menu->setWindowFlags(Qt::Popup | Qt::NoDropShadowWindowHint | Qt::WindowStaysOnTopHint);
-
+    menu->setAttribute(Qt::WA_NoSystemBackground);
+    // 给边框留出 1px 的边距，防止边缘毛刺
+    menu->setContentsMargins(1, 1, 1, 1);
+    
+    // 使用 standard Popup 保证原生菜单体验
+    menu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    
+    // 使用半透明背景 (rgba)，Qt 会自动处理抗锯齿圆角
     menu->setStyleSheet(R"(
         QMenu {
-            background-color: rgba(45, 45, 50, 230);
+            background-color: rgba(45, 45, 50, 240);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
             padding: 4px;
@@ -1289,13 +1290,13 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
         QMenu::item {
             background: transparent;
             color: #ffffff;
-            padding: 5px 24px;
+            padding: 5px 16px;
             min-height: 20px;
             border-radius: 4px;
             margin: 2px 4px;
         }
         QMenu::item:selected {
-            background-color: #505055;
+            background-color: rgba(255, 255, 255, 0.1);
         }
         QMenu::separator {
             height: 1px;
@@ -1306,33 +1307,62 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
 
     QAction *renameAction = menu->addAction("重命名");
     QAction *collapseAction = menu->addAction(m_collapsed ? "展开" : "折叠");
-    
     menu->addSeparator();
     QAction *deleteAction = menu->addAction("删除围栏");
 
-
-
-    QAction *selected = menu->exec(event->globalPos());
-
-    if (selected == renameAction) {
-        startTitleEdit();
-    } else if (selected == collapseAction) {
+    // 连接菜单动作
+    connect(renameAction, &QAction::triggered, this, &FenceWindow::startTitleEdit);
+    connect(collapseAction, &QAction::triggered, this, [this]() {
         setCollapsed(!m_collapsed);
-    } else if (selected == deleteAction) {
+    });
+    connect(deleteAction, &QAction::triggered, this, [this]() {
         emit deleteRequested(this);
-    }
-    
-    // 手动删除（虽然设置了 WA_DeleteOnClose，但 exec 是阻塞的，为了安全可以手动删，或者让它自生自灭）
-    // 由于是 exec() 阻塞调用，结束后 delete 是安全的
-    delete menu;
+    });
 
-    // 菜单关闭后，不需要强制切换焦点，让系统自然处理
-    // 强制切换到 Progman 可能会导致某些情况下焦点混乱
-    // #ifdef Q_OS_WIN
-    // HWND hProgman = FindWindow(L"Progman", NULL);
-    // if (hProgman) SetForegroundWindow(hProgman);
-    // #endif
+#ifdef Q_OS_WIN
+    connect(menu, &QMenu::aboutToShow, this, [this, menu]() {
+        // 使用定时器延迟执行，确保在 Qt 完成窗口创建和显示之后再进行 Hack
+        // 这样可以覆盖 Qt 默认的 TopMost 设置
+        QTimer::singleShot(10, this, [this, menu]() {
+            if (!menu) return;
+            HWND hMenu = (HWND)menu->winId();
+            HWND hFence = (HWND)this->winId();
+            
+            // 0. 裁剪圆角 (解决黑点/毛刺问题)
+            BlurHelper::enableRoundedCorners(menu, 8); 
+            
+            // 1. 移除 WS_EX_TOPMOST 扩展样式，防止强制置顶
+
+            // 1. 移除 WS_EX_TOPMOST 扩展样式，防止强制置顶
+            LONG_PTR exStyle = GetWindowLongPtr(hMenu, GWL_EXSTYLE);
+            if (exStyle & WS_EX_TOPMOST) {
+                SetWindowLongPtr(hMenu, GWL_EXSTYLE, exStyle & ~WS_EX_TOPMOST);
+            }
+            
+            // 2. 调整 Z-order
+            // 获取围栏上面的那个窗口（hPrev）
+            // 如果我们将菜单插入到 hPrev 后面，菜单自然就在 围栏 上面，且在 hPrev 下面
+            HWND hPrev = GetWindow(hFence, GW_HWNDPREV);
+            
+            UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED;
+            
+            if (hPrev) {
+                SetWindowPos(hMenu, hPrev, 0, 0, 0, 0, flags);
+            } else {
+                // 如果围栏上面没有窗口（围栏就是当前层级的顶），则将菜单设为顶
+                // 注意：由于移除了 TOPMOST，这里的 HWND_TOP 只是非 TopMost 窗口的顶
+                SetWindowPos(hMenu, HWND_TOP, 0, 0, 0, 0, flags);
+            }
+        });
+    });
+#endif
+
+    // 使用 exec 阻塞显示
+    menu->exec(event->globalPos());
 }
+
+
+
 
 
 
