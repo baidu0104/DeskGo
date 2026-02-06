@@ -390,6 +390,10 @@ void FenceWindow::showEvent(QShowEvent *event)
         
         // 4. 发出信号
         emit firstShowCompleted();
+    } else {
+        // 从隐藏恢复显示时，重新设置窗口位置到底层
+        HWND hWnd = (HWND)winId();
+        SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
     
     setupBlurEffect();
@@ -489,8 +493,14 @@ void FenceWindow::setCollapsed(bool collapsed)
         m_collapseAnimation->disconnect(this);
 
         connect(m_collapseAnimation, &QVariantAnimation::valueChanged, this, [this](const QVariant &value) {
-            // 使用 resize 直接改变大小，因为我们已经解除了限制
+            // 使用 Windows API 直接设置高度，绕过 Qt 的几何约束
+#ifdef Q_OS_WIN
+            HWND hWnd = (HWND)winId();
+            SetWindowPos(hWnd, NULL, 0, 0, width(), value.toInt(), 
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+#else
             resize(width(), value.toInt());
+#endif
         });
 
         connect(m_collapseAnimation, &QVariantAnimation::finished, this, [this, collapsed, endHeight]() {
@@ -777,7 +787,8 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
     // 拦截 WM_WINDOWPOSCHANGING 以防止闪烁和隐藏
     if (msg->message == WM_WINDOWPOSCHANGING) {
         // 只有在嵌入桌面模式且非置顶状态下才干预
-        if (m_desktopEmbedded && !m_alwaysOnTop) {
+        // 但如果是用户主动隐藏（m_userHidden），则不拦截
+        if (m_desktopEmbedded && !m_alwaysOnTop && !m_userHidden) {
             WINDOWPOS* pos = (WINDOWPOS*)msg->lParam;
             
             // 1. 防止隐藏 (Win+D 会尝试隐藏窗口)
@@ -906,6 +917,18 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
         }
     }
     
+    // 处理客户区双击：如果在标题栏区域，启动编辑模式
+    // 这是因为 WM_NCHITTEST 返回 HTCLIENT 而不是 HTCAPTION，
+    // 所以双击事件会作为 WM_LBUTTONDBLCLK 而不是 WM_NCLBUTTONDBLCLK 发送
+    if (msg->message == WM_LBUTTONDBLCLK) {
+        QPoint localPos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
+        if (titleBarRect().contains(localPos)) {
+            startTitleEdit();
+            *result = 0;
+            return true;
+        }
+    }
+    
     // 处理标题栏右键：显示自定义菜单而不是系统菜单
     if (msg->message == WM_NCRBUTTONUP) {
         if (msg->wParam == HTCAPTION) {
@@ -1021,7 +1044,8 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
             m_isDragging = true;
         }
         
-        raise();
+        // 注意：移除了 raise() 调用，因为桌面嵌入窗口不应该改变 Z-order
+        // 这可能会干扰 WM_WINDOWPOSCHANGING 拦截逻辑
         event->accept();
     }
 }

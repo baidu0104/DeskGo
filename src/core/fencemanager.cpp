@@ -186,7 +186,14 @@ void FenceManager::setupTrayIcon()
 
     addCenteredAction("新建围栏", [this](){ onNewFenceRequested(); });
     addCenteredAction("显示/隐藏全部围栏", [this](){
-        if (m_fencesVisible) hideAllFences(); else showAllFences();
+        // 延迟执行，确保菜单关闭动画完成后再操作窗口
+        QTimer::singleShot(50, this, [this]() {
+            if (m_fencesVisible) {
+                hideAllFences();
+            } else {
+                showAllFences();
+            }
+        });
     });
 
     m_trayMenu->addSeparator();
@@ -223,17 +230,43 @@ bool FenceManager::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched->objectName() == "menuItemLabel") {
         if (event->type() == QEvent::MouseButtonRelease) {
-            // 当点击自定义标签时，关闭菜单并执行对应的 Action
-            m_trayMenu->close();
             QLabel *label = qobject_cast<QLabel*>(watched);
-            // 查找到该 Label 关联的 Action
-            for (QAction *action : m_trayMenu->actions()) {
-                QWidgetAction *wa = qobject_cast<QWidgetAction*>(action);
-                if (wa && wa->defaultWidget() == label) {
-                    wa->trigger();
-                    return true;
-                }
+            if (!label) return QObject::eventFilter(watched, event);
+            
+            QString text = label->text();
+            
+            // 先关闭菜单
+            m_trayMenu->close();
+            
+            // 根据文本直接执行对应操作
+            if (text == "新建围栏") {
+                QTimer::singleShot(10, this, [this]() {
+                    onNewFenceRequested();
+                });
+            } else if (text == "显示/隐藏全部围栏") {
+                QTimer::singleShot(10, this, [this]() {
+                    if (m_fencesVisible) {
+                        hideAllFences();
+                    } else {
+                        showAllFences();
+                    }
+                });
+            } else if (text == "关于 DeskGo") {
+                QTimer::singleShot(10, this, []() {
+                    QMessageBox::about(nullptr, "关于 DeskGo",
+                        "<div style='text-align: center; font-family: Microsoft YaHei;'>"
+                        "<h3>DeskGo</h3>"
+                        "<p>桌面围栏管理工具</p>"
+                        "<p>版本: 1.0.1</p>"
+                        "</div>");
+                });
+            } else if (text == "退出应用") {
+                QTimer::singleShot(10, this, [this]() {
+                    onExitRequested();
+                });
             }
+            
+            return true;
         }
     }
     return QObject::eventFilter(watched, event);
