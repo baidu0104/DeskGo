@@ -98,6 +98,11 @@ private:
     void setupUi();
     void setupBlurEffect();
     QRect titleBarRect() const;
+    
+    // 边缘吸附功能
+    static const int SNAP_THRESHOLD = 10; // 吸附阈值（像素）
+    QPoint snapPositionToOtherFences(const QPoint& targetPos, const QSize& targetSize) const;
+    QRect snapGeometryToOtherFences(const QRect& targetGeo, int resizeEdge) const;
 
     QString m_id;
     QLabel *m_titleLabel;
@@ -144,8 +149,6 @@ private:
     static HHOOK s_hMouseHook;
     static QPointer<FenceWindow> s_editingFence; // 使用 QPointer 自动处理对象删除
     
-    // 恢复定时器：Win+D 后自动恢复
-    QTimer *m_restoreTimer = nullptr;
     
     bool m_userHidden = false; // 用户主动隐藏
     bool m_isClosing = false; // 程序正在关闭

@@ -7,7 +7,6 @@
 #include <QPainterPath>
 #include <QMouseEvent>
 #include <QMenu>
-#include <QInputDialog>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QScreen>
@@ -28,7 +27,6 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <windowsx.h>
-#include <dwmapi.h>
 
 // WM_MOUSEACTIVATE 返回值
 #ifndef MA_NOACTIVATE
@@ -37,7 +35,6 @@
 #endif
 
 #include <QtWin>
-#include <QtWinExtras>
 
 // 日志记录函数
 void logToDesktop(const QString &msg) {
@@ -993,8 +990,152 @@ QRect FenceWindow::titleBarRect() const
     return QRect(0, 0, width(), 32);
 }
 
-// 移除 hitTest
-// 移除 ResizeEdge 枚举定义（如果在 cpp 中有的话，但它在头文件中定义，cpp 只用了它）
+// 边缘吸附：拖动时计算吸附后的位置
+QPoint FenceWindow::snapPositionToOtherFences(const QPoint& targetPos, const QSize& targetSize) const
+{
+    QPoint snappedPos = targetPos;
+    int snapX = SNAP_THRESHOLD + 1; // 当前最小X吸附距离
+    int snapY = SNAP_THRESHOLD + 1; // 当前最小Y吸附距离
+    
+    // 当前围栏的目标边缘
+    int myLeft = targetPos.x();
+    int myRight = targetPos.x() + targetSize.width();
+    int myTop = targetPos.y();
+    int myBottom = targetPos.y() + targetSize.height();
+    
+    // 遍历所有其他围栏
+    for (FenceWindow* other : s_allFences) {
+        if (other == this) continue;
+        
+        QRect otherRect = other->geometry();
+        int otherLeft = otherRect.left();
+        int otherRight = otherRect.right() + 1; // Qt的right()是width()-1
+        int otherTop = otherRect.top();
+        int otherBottom = otherRect.bottom() + 1;
+        
+        // 水平方向吸附检测
+        // 左边缘对齐其他围栏的左边缘
+        int dist = qAbs(myLeft - otherLeft);
+        if (dist < snapX && dist <= SNAP_THRESHOLD) {
+            snapX = dist;
+            snappedPos.setX(otherLeft);
+        }
+        // 左边缘对齐其他围栏的右边缘
+        dist = qAbs(myLeft - otherRight);
+        if (dist < snapX && dist <= SNAP_THRESHOLD) {
+            snapX = dist;
+            snappedPos.setX(otherRight);
+        }
+        // 右边缘对齐其他围栏的左边缘
+        dist = qAbs(myRight - otherLeft);
+        if (dist < snapX && dist <= SNAP_THRESHOLD) {
+            snapX = dist;
+            snappedPos.setX(otherLeft - targetSize.width());
+        }
+        // 右边缘对齐其他围栏的右边缘
+        dist = qAbs(myRight - otherRight);
+        if (dist < snapX && dist <= SNAP_THRESHOLD) {
+            snapX = dist;
+            snappedPos.setX(otherRight - targetSize.width());
+        }
+        
+        // 垂直方向吸附检测
+        // 上边缘对齐其他围栏的上边缘
+        dist = qAbs(myTop - otherTop);
+        if (dist < snapY && dist <= SNAP_THRESHOLD) {
+            snapY = dist;
+            snappedPos.setY(otherTop);
+        }
+        // 上边缘对齐其他围栏的下边缘
+        dist = qAbs(myTop - otherBottom);
+        if (dist < snapY && dist <= SNAP_THRESHOLD) {
+            snapY = dist;
+            snappedPos.setY(otherBottom);
+        }
+        // 下边缘对齐其他围栏的上边缘
+        dist = qAbs(myBottom - otherTop);
+        if (dist < snapY && dist <= SNAP_THRESHOLD) {
+            snapY = dist;
+            snappedPos.setY(otherTop - targetSize.height());
+        }
+        // 下边缘对齐其他围栏的下边缘
+        dist = qAbs(myBottom - otherBottom);
+        if (dist < snapY && dist <= SNAP_THRESHOLD) {
+            snapY = dist;
+            snappedPos.setY(otherBottom - targetSize.height());
+        }
+    }
+    
+    return snappedPos;
+}
+
+// 边缘吸附：调整大小时计算吸附后的几何矩形
+QRect FenceWindow::snapGeometryToOtherFences(const QRect& targetGeo, int resizeEdge) const
+{
+    QRect snappedGeo = targetGeo;
+    
+    // 遍历所有其他围栏
+    for (FenceWindow* other : s_allFences) {
+        if (other == this) continue;
+        
+        QRect otherRect = other->geometry();
+        int otherLeft = otherRect.left();
+        int otherRight = otherRect.right() + 1;
+        int otherTop = otherRect.top();
+        int otherBottom = otherRect.bottom() + 1;
+        
+        // 根据调整的边缘进行吸附
+        if (resizeEdge & Left) {
+            int myLeft = snappedGeo.left();
+            // 左边缘对齐其他围栏的左边缘
+            if (qAbs(myLeft - otherLeft) <= SNAP_THRESHOLD) {
+                snappedGeo.setLeft(otherLeft);
+            }
+            // 左边缘对齐其他围栏的右边缘
+            else if (qAbs(myLeft - otherRight) <= SNAP_THRESHOLD) {
+                snappedGeo.setLeft(otherRight);
+            }
+        }
+        
+        if (resizeEdge & Right) {
+            int myRight = snappedGeo.right() + 1;
+            // 右边缘对齐其他围栏的左边缘
+            if (qAbs(myRight - otherLeft) <= SNAP_THRESHOLD) {
+                snappedGeo.setRight(otherLeft - 1);
+            }
+            // 右边缘对齐其他围栏的右边缘
+            else if (qAbs(myRight - otherRight) <= SNAP_THRESHOLD) {
+                snappedGeo.setRight(otherRight - 1);
+            }
+        }
+        
+        if (resizeEdge & Top) {
+            int myTop = snappedGeo.top();
+            // 上边缘对齐其他围栏的上边缘
+            if (qAbs(myTop - otherTop) <= SNAP_THRESHOLD) {
+                snappedGeo.setTop(otherTop);
+            }
+            // 上边缘对齐其他围栏的下边缘
+            else if (qAbs(myTop - otherBottom) <= SNAP_THRESHOLD) {
+                snappedGeo.setTop(otherBottom);
+            }
+        }
+        
+        if (resizeEdge & Bottom) {
+            int myBottom = snappedGeo.bottom() + 1;
+            // 下边缘对齐其他围栏的上边缘
+            if (qAbs(myBottom - otherTop) <= SNAP_THRESHOLD) {
+                snappedGeo.setBottom(otherTop - 1);
+            }
+            // 下边缘对齐其他围栏的下边缘
+            else if (qAbs(myBottom - otherBottom) <= SNAP_THRESHOLD) {
+                snappedGeo.setBottom(otherBottom - 1);
+            }
+        }
+    }
+    
+    return snappedGeo;
+}
 
 void FenceWindow::mousePressEvent(QMouseEvent *event)
 {
@@ -1055,8 +1196,13 @@ void FenceWindow::mouseMoveEvent(QMouseEvent *event)
     // 如果正在拖拽
     if (m_isDragging && (event->buttons() & Qt::LeftButton)) {
         QPoint delta = event->globalPos() - m_dragStartGlobalPos;
-        move(pos() + delta);
-        m_dragStartGlobalPos = event->globalPos();
+        QPoint newPos = m_resizeStartGeo.topLeft() + delta; // 使用起始几何位置
+        
+        // 应用围栏间边缘吸附
+        QPoint snappedPos = snapPositionToOtherFences(newPos, size());
+        
+        move(snappedPos);
+        // 注意：不更新 m_dragStartGlobalPos，保持相对于起始位置的计算
         event->accept();
         return;
     }
@@ -1081,6 +1227,31 @@ void FenceWindow::mouseMoveEvent(QMouseEvent *event)
         if (m_resizeEdge & Bottom) {
             newGeo.setBottom(m_resizeStartGeo.bottom() + delta.y());
             if (newGeo.height() < minimumHeight()) newGeo.setBottom(m_resizeStartGeo.top() + minimumHeight());
+        }
+        
+        // 应用围栏间边缘吸附
+        newGeo = snapGeometryToOtherFences(newGeo, m_resizeEdge);
+        
+        // 确保吸附后仍满足最小尺寸约束
+        if (newGeo.width() < minimumWidth() || newGeo.height() < minimumHeight()) {
+            // 如果吸附导致尺寸过小，恢复到吸附前的几何
+            newGeo = m_resizeStartGeo;
+            if (m_resizeEdge & Left) {
+                newGeo.setLeft(m_resizeStartGeo.left() + delta.x());
+                if (newGeo.width() < minimumWidth()) newGeo.setLeft(m_resizeStartGeo.right() - minimumWidth());
+            }
+            if (m_resizeEdge & Right) {
+                newGeo.setRight(m_resizeStartGeo.right() + delta.x());
+                if (newGeo.width() < minimumWidth()) newGeo.setRight(m_resizeStartGeo.left() + minimumWidth());
+            }
+            if (m_resizeEdge & Top) {
+                newGeo.setTop(m_resizeStartGeo.top() + delta.y());
+                if (newGeo.height() < minimumHeight()) newGeo.setTop(m_resizeStartGeo.bottom() - minimumHeight());
+            }
+            if (m_resizeEdge & Bottom) {
+                newGeo.setBottom(m_resizeStartGeo.bottom() + delta.y());
+                if (newGeo.height() < minimumHeight()) newGeo.setBottom(m_resizeStartGeo.top() + minimumHeight());
+            }
         }
         
         setGeometry(newGeo);
@@ -1130,7 +1301,7 @@ void FenceWindow::mouseReleaseEvent(QMouseEvent *event)
             QApplication::restoreOverrideCursor();
         }
         
-        // 拖动结束后，确保围栏至少部分在屏幕内
+        // 拖动结束后，确保围栏完全在屏幕内（允许贴边）
         if (m_isDragging) {
             QScreen *screen = QApplication::screenAt(geometry().center());
             if (!screen) {
@@ -1140,24 +1311,22 @@ void FenceWindow::mouseReleaseEvent(QMouseEvent *event)
                 QRect screenRect = screen->availableGeometry();
                 QPoint newPos = pos();
                 
-                // 确保至少 50 像素在屏幕内
-                const int minVisible = 50;
-                
-                // 左边界：窗口右边缘至少留 minVisible 在屏幕内
-                if (newPos.x() + width() < screenRect.left() + minVisible) {
-                    newPos.setX(screenRect.left() + minVisible - width());
+                // 限制窗口不能超出屏幕边缘（允许完全贴边）
+                // 左边界：窗口左边缘不能小于屏幕左边缘
+                if (newPos.x() < screenRect.left()) {
+                    newPos.setX(screenRect.left());
                 }
-                // 右边界：窗口左边缘至少留 minVisible 在屏幕内
-                if (newPos.x() > screenRect.right() - minVisible) {
-                    newPos.setX(screenRect.right() - minVisible);
+                // 右边界：窗口右边缘不能超过屏幕右边缘
+                if (newPos.x() + width() > screenRect.right()) {
+                    newPos.setX(screenRect.right() - width());
                 }
-                // 上边界：窗口下边缘至少留 minVisible 在屏幕内
-                if (newPos.y() + height() < screenRect.top() + minVisible) {
-                    newPos.setY(screenRect.top() + minVisible - height());
+                // 上边界：窗口上边缘不能小于屏幕上边缘
+                if (newPos.y() < screenRect.top()) {
+                    newPos.setY(screenRect.top());
                 }
-                // 下边界：窗口上边缘至少留 minVisible 在屏幕内
-                if (newPos.y() > screenRect.bottom() - minVisible) {
-                    newPos.setY(screenRect.bottom() - minVisible);
+                // 下边界：窗口下边缘不能超过屏幕下边缘
+                if (newPos.y() + height() > screenRect.bottom()) {
+                    newPos.setY(screenRect.bottom() - height());
                 }
                 
                 if (newPos != pos()) {
@@ -1304,7 +1473,7 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
     // 使用半透明背景 (rgba)，Qt 会自动处理抗锯齿圆角
     menu->setStyleSheet(R"(
         QMenu {
-            background-color: rgba(45, 45, 50, 240);
+            background-color: rgba(30, 30, 35, 200);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
             padding: 4px;
@@ -1496,7 +1665,6 @@ void FenceWindow::dragLeaveEvent(QDragLeaveEvent *event)
     update();
 }
 
-#include <QtWin>
 
 // 移除这里的 getWinIcon 定义，移到头部
 void FenceWindow::dropEvent(QDropEvent *event)
