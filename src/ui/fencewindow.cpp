@@ -856,10 +856,16 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
 #ifdef Q_OS_WIN
     MSG *msg = static_cast<MSG*>(message);
     
-    // 处理 WM_MOUSEACTIVATE 消息，防止点击时激活窗口
+    // 处理 WM_MOUSEACTIVATE 消息
     if (msg->message == WM_MOUSEACTIVATE) {
-        // 始终返回 MA_NOACTIVATE，不激活窗口但保留鼠标消息
-        // 即使在编辑标题时也不激活窗口，避免 Z-order 改变
+        // 如果正在编辑，允许激活窗口以便接收键盘输入
+        if (m_titleEdit) {
+            *result = MA_ACTIVATE;
+            return true;
+        }
+        
+        // 否则不激活窗口但保留鼠标消息
+        // 即使在编辑标题时也不激活窗口，避免 Z-order 改变 -> 修正：必须激活才能输入
         *result = MA_NOACTIVATE;
         return true;
     }
@@ -882,6 +888,11 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
     // 拦截 WM_NCACTIVATE，防止非客户区（标题栏）显示为激活颜色
     // 同时也阻止窗口状态变为 "Active"
     if (msg->message == WM_NCACTIVATE) {
+        // 如果正在编辑，允许正常的激活处理
+        if (m_titleEdit) {
+            return QWidget::nativeEvent(eventType, message, result);
+        }
+
         // 强制返回 TRUE，表示我们处理了该消息，并且保持非激活外观（wParam=FALSE 当我们不像让它激活时）
         // 这里不管 wParam 是什么，都假装它是 FALSE（非激活），但实际上我们直接返回 true 跳过默认处理
         // 如果想让它看起来总是非激活，可以忽略 wParam，直接调用 DefWindowProc(..., FALSE, ...)
@@ -902,8 +913,8 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
     // 拦截 WM_WINDOWPOSCHANGING 以防止闪烁和隐藏
     if (msg->message == WM_WINDOWPOSCHANGING) {
         // 只有在嵌入桌面模式且非置顶状态下才干预
-        // 但如果是用户主动隐藏（m_userHidden），则不拦截
-        if (m_desktopEmbedded && !m_alwaysOnTop && !m_userHidden) {
+        // 但如果是用户主动隐藏（m_userHidden）或正在编辑标题时，则不拦截
+        if (m_desktopEmbedded && !m_alwaysOnTop && !m_userHidden && !m_titleEdit) {
             WINDOWPOS* pos = (WINDOWPOS*)msg->lParam;
             
             // 1. 防止隐藏 (Win+D 会尝试隐藏窗口)
@@ -2082,7 +2093,9 @@ void FenceWindow::startTitleEdit()
     m_titleEdit->show();
     m_titleEdit->raise();
     
-    // 使用 Qt 的方式设置焦点，但不激活窗口
+    // 使用 Qt 的方式设置焦点
+    // 关键修正：必须激活窗口才能接收键盘输入
+    activateWindow();
     m_titleEdit->setFocus(Qt::MouseFocusReason);
     
     // 按 Enter 完成编辑
