@@ -40,13 +40,16 @@ void IconWidget::setupUi()
     m_iconLabel->setScaledContents(false);
 
     if (!m_data.icon.isNull()) {
-        m_iconLabel->setPixmap(m_data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        qreal dpr = devicePixelRatio();
+        int size = 48 * dpr;
+        QPixmap scaled = m_data.icon.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        scaled.setDevicePixelRatio(dpr);
+        m_iconLabel->setPixmap(scaled);
     } else {
         // 图标加载失败时的后备显示：使用系统标准文件图标
         QIcon fallbackIcon = style()->standardIcon(QStyle::SP_FileIcon);
+        // AA_UseHighDpiPixmaps 启用时，QIcon::pixmap(48, 48) 会自动返回高分屏 Pixmap
         m_iconLabel->setPixmap(fallbackIcon.pixmap(48, 48));
-        // m_iconLabel->setText("?");
-        // m_iconLabel->setStyleSheet("color: red; ...");
     }
     layout->addWidget(m_iconLabel, 0, Qt::AlignCenter);
 
@@ -65,7 +68,7 @@ void IconWidget::setupUi()
     m_nameLabel->setStyleSheet(R"(
         QLabel {
             color: #ffffff;
-            font-size: 11px;
+            font-size: 12px;
             background: transparent;
         }
     )");
@@ -87,8 +90,22 @@ void IconWidget::setData(const IconData &data)
     m_nameLabel->setText(elidedText);
     
     if (!data.icon.isNull()) {
-        m_iconLabel->setPixmap(data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        qreal dpr = devicePixelRatio();
+        int size = 48 * dpr;
+        QPixmap scaled = data.icon.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        scaled.setDevicePixelRatio(dpr);
+        m_iconLabel->setPixmap(scaled);
     }
+}
+
+void IconWidget::setTextVisible(bool visible)
+{
+    m_nameLabel->setVisible(visible);
+}
+
+bool IconWidget::isTextVisible() const
+{
+    return m_nameLabel->isVisible();
 }
 
 QString IconWidget::name() const
@@ -145,7 +162,11 @@ void IconWidget::mouseMoveEvent(QMouseEvent *event)
         drag->setMimeData(mimeData);
 
         if (!m_data.icon.isNull()) {
-            drag->setPixmap(m_data.icon.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            qreal dpr = devicePixelRatio();
+            int size = 48 * dpr;
+            QPixmap scaled = m_data.icon.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            scaled.setDevicePixelRatio(dpr);
+            drag->setPixmap(scaled);
         }
 
         emit dragStarted();

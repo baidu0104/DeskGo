@@ -196,6 +196,12 @@ void FenceManager::setupTrayIcon()
         });
     });
 
+    addCenteredAction(ConfigManager::instance()->iconTextVisible() ? "隐藏图标文字" : "显示图标文字", [this]() {
+         // 这里的 label 文本会在 ConfigManager 信号回调中自动更新
+         bool current = ConfigManager::instance()->iconTextVisible();
+         ConfigManager::instance()->setIconTextVisible(!current);
+    });
+
     m_trayMenu->addSeparator();
 
     // 修复标准项颜色并尽量通过空格平衡视觉
@@ -224,6 +230,28 @@ void FenceManager::setupTrayIcon()
             this, &FenceManager::onTrayIconActivated);
 
     m_trayIcon->show();
+
+    // 监听配置变化，实时更新所有围栏
+    connect(ConfigManager::instance(), &ConfigManager::iconTextVisibleChanged, this, [this](bool visible) {
+        for (FenceWindow *fence : m_fences) {
+            if (fence) fence->setIconTextVisible(visible);
+        }
+        
+        // 更新菜单项文字 (如果菜单正在显示，虽然通常点击后菜单就关了)
+        // 遍历 action 找到对应的并更新文字
+        QList<QAction*> actions = m_trayMenu->actions();
+        for (QAction *action : actions) {
+            QWidgetAction *wa = qobject_cast<QWidgetAction*>(action);
+            if (wa) {
+                QLabel *label = qobject_cast<QLabel*>(wa->defaultWidget());
+                if (label) {
+                    if (label->text().contains("图标文字")) {
+                         label->setText(visible ? "隐藏图标文字" : "显示图标文字");
+                    }
+                }
+            }
+        }
+    });
 }
 
 bool FenceManager::eventFilter(QObject *watched, QEvent *event)
@@ -263,6 +291,13 @@ bool FenceManager::eventFilter(QObject *watched, QEvent *event)
             } else if (text == "退出应用") {
                 QTimer::singleShot(10, this, [this]() {
                     onExitRequested();
+                });
+
+            } else if (text.contains("图标文字")) {
+                // 处理图标文字显示的切换
+                QTimer::singleShot(10, this, []() {
+                    bool current = ConfigManager::instance()->iconTextVisible();
+                    ConfigManager::instance()->setIconTextVisible(!current);
                 });
             }
             

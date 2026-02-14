@@ -29,6 +29,9 @@ public:
     IconData data() const;
     void setData(const IconData &data);
 
+    void setTextVisible(bool visible);
+    bool isTextVisible() const;
+
     QString name() const;
     QString path() const;
 

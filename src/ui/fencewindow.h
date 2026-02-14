@@ -58,6 +58,9 @@ public:
     void setAlwaysOnTop(bool onTop);
     bool isAlwaysOnTop() const { return m_alwaysOnTop; }
 
+    // 设置图标文字显示
+    void setIconTextVisible(bool visible);
+
     // 序列化
     QJsonObject toJson() const;
     static FenceWindow* fromJson(const QJsonObject &json);

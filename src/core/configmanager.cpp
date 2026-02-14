@@ -79,6 +79,20 @@ void ConfigManager::setTheme(const QString &theme)
     }
 }
 
+bool ConfigManager::iconTextVisible() const
+{
+    return m_iconTextVisible;
+}
+
+void ConfigManager::setIconTextVisible(bool visible)
+{
+    if (m_iconTextVisible != visible) {
+        m_iconTextVisible = visible;
+        save();
+        emit iconTextVisibleChanged(visible);
+    }
+}
+
 QRect ConfigManager::windowGeometry() const
 {
     return m_windowGeometry;
@@ -116,7 +130,9 @@ void ConfigManager::save()
 
     m_settings->setValue("General/AutoStart", m_autoStart);
     m_settings->setValue("General/MinimizeToTray", m_minimizeToTray);
+
     m_settings->setValue("General/Theme", m_theme);
+    m_settings->setValue("General/IconTextVisible", m_iconTextVisible);
 
     m_settings->setValue("Window/Geometry", m_windowGeometry);
     m_settings->setValue("Window/Maximized", m_windowMaximized);
@@ -136,7 +152,9 @@ void ConfigManager::load()
 
     m_autoStart = m_settings->value("General/AutoStart", false).toBool();
     m_minimizeToTray = m_settings->value("General/MinimizeToTray", true).toBool();
+
     m_theme = m_settings->value("General/Theme", "dark").toString();
+    m_iconTextVisible = m_settings->value("General/IconTextVisible", true).toBool();
 
     m_windowGeometry = m_settings->value("Window/Geometry", QRect()).toRect();
     m_windowMaximized = m_settings->value("Window/Maximized", false).toBool();

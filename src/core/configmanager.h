@@ -27,6 +27,10 @@ public:
     QString theme() const;
     void setTheme(const QString &theme);
 
+    // 图标显示设置
+    bool iconTextVisible() const;
+    void setIconTextVisible(bool visible);
+
     // 窗口状态
     QRect windowGeometry() const;
     void setWindowGeometry(const QRect &geometry);
@@ -45,6 +49,7 @@ public:
 signals:
     void autoStartChanged(bool enabled);
     void themeChanged(const QString &theme);
+    void iconTextVisibleChanged(bool visible);
 
 private:
     explicit ConfigManager(QObject *parent = nullptr);
@@ -59,6 +64,7 @@ private:
     bool m_autoStart = false;
     bool m_minimizeToTray = true;
     QString m_theme = "dark";
+    bool m_iconTextVisible = true;
     QRect m_windowGeometry;
     bool m_windowMaximized = false;
     QJsonObject m_fencesData;

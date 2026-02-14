@@ -2,6 +2,7 @@
 #include "iconwidget.h"
 #include "flowlayout.h"
 #include "../platform/blurhelper.h"
+#include "../core/configmanager.h"
 
 #include <QPainter>
 #include <QPainterPath>
@@ -13,8 +14,7 @@
 #include <QApplication>
 #include <QMimeData>
 #include <QVariantAnimation>
-#include <QDragEnterEvent>
-#include <QDropEvent>
+
 #include <QFileInfo>
 #include <QFileIconProvider>
 #include <QDir>
@@ -35,6 +35,20 @@
 #endif
 
 #include <QtWin>
+#include <shlobj.h>
+#include <commoncontrols.h>
+
+// 确保定义 SHIL_JUMBO，以防编译环境缺失
+#ifndef SHIL_JUMBO
+#define SHIL_JUMBO 0x4
+#endif
+#ifndef SHIL_EXTRALARGE
+#define SHIL_EXTRALARGE 0x2
+#endif
+
+// 定义 IImageList 接口 ID
+// UUID: 46EB5926-582E-4017-9FDF-E8998DAA0950
+static const GUID IID_IImageList_LOCAL = { 0x46EB5926, 0x582E, 0x4017, { 0x9F, 0xDF, 0xE8, 0x99, 0x8D, 0xAA, 0x09, 0x50 } };
 
 // 日志记录函数
 void logToDesktop(const QString &msg) {
@@ -169,49 +183,148 @@ LRESULT CALLBACK FenceWindow::MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(s_hMouseHook, nCode, wParam, lParam);
 }
 
+// 辅助函数：裁剪透明边框
+// 用于处理那些画布很大但实际内容很小的图标 (如某些 256x256 图标实际只有 32x32 的内容)
+static QPixmap cropTransparent(const QPixmap& pixmap) {
+    if (pixmap.isNull()) return pixmap;
+    
+    QImage img = pixmap.toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    int w = img.width();
+    int h = img.height();
+    
+    // 如果图片已经很小，就不需要处理了
+    if (w <= 48 && h <= 48) return pixmap;
+
+    int top = -1, bottom = -1, left = -1, right = -1;
+
+    // 扫描上边界
+    for (int y = 0; y < h; ++y) {
+        const QRgb *scanLine = (const QRgb *)img.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            if (qAlpha(scanLine[x]) > 10) { // 阈值 > 10 忽略极淡的杂色
+                top = y;
+                break;
+            }
+        }
+        if (top != -1) break;
+    }
+
+    if (top == -1) return pixmap; // 全透明
+
+    // 扫描下边界
+    for (int y = h - 1; y >= top; --y) {
+        const QRgb *scanLine = (const QRgb *)img.constScanLine(y);
+        for (int x = 0; x < w; ++x) {
+            if (qAlpha(scanLine[x]) > 10) {
+                bottom = y;
+                break;
+            }
+        }
+        if (bottom != -1) break;
+    }
+
+    // 扫描左边界
+    for (int x = 0; x < w; ++x) {
+        for (int y = top; y <= bottom; ++y) {
+             if (qAlpha(img.pixel(x, y)) > 10) {
+                 left = x;
+                 break;
+             }
+        }
+        if (left != -1) break;
+    }
+
+    // 扫描右边界
+    for (int x = w - 1; x >= left; --x) {
+        for (int y = top; y <= bottom; ++y) {
+             if (qAlpha(img.pixel(x, y)) > 10) {
+                 right = x;
+                 break;
+             }
+        }
+        if (right != -1) break;
+    }
+    
+    QRect validRect(left, top, right - left + 1, bottom - top + 1);
+    
+    // 只有当有效区域显著小于原图时才裁剪 (例如有效面积 < 原图的 40% 或者 边长 < 60%)
+    // 对于 256x256 的图，如果内容只有 128x128 (50% 边长)，裁剪是有意义的
+    if (validRect.width() < w * 0.7 && validRect.height() < h * 0.7) {
+        // 稍微留一点边距 (10%)
+        int padding = qMax(validRect.width(), validRect.height()) * 0.1;
+        validRect.adjust(-padding, -padding, padding, padding);
+        
+        // 确保不越界
+        validRect = validRect.intersected(img.rect());
+        
+        // 只有当裁剪后的尺寸仍然有意义时才返回
+        if (validRect.isValid() && validRect.width() > 0 && validRect.height() > 0) {
+             return QPixmap::fromImage(img.copy(validRect));
+        }
+    }
+
+    return pixmap;
+}
+
 // 获取系统原生图标辅助函数
 static QPixmap getWinIcon(const QString &path) {
-    // logToDesktop("Getting icon for: " + path);
-    
     // 确保 COM 初始化
     CoInitialize(NULL);
-    // logToDesktop(QString("CoInitialize result: %1").arg((unsigned long)hr, 0, 16));
+    
+    QString nativePath = QDir::toNativeSeparators(path);
+    QPixmap result;
     
     SHFILEINFO shfi;
     memset(&shfi, 0, sizeof(shfi));
-    QString nativePath = QDir::toNativeSeparators(path);
-    QPixmap result;
 
-    // 尝试1: 标准 SHGetFileInfo
-    DWORD_PTR res = SHGetFileInfo((const wchar_t*)nativePath.utf16(), 0, &shfi, sizeof(shfi), 
-                      SHGFI_ICON | SHGFI_LARGEICON);
-    
-    if (res != 0) {
-        QPixmap pixmap = QtWin::fromHICON(shfi.hIcon);
-        DestroyIcon(shfi.hIcon);
-        if (!pixmap.isNull()) {
-             result = pixmap.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-             // logToDesktop("Success with SHGetFileInfo");
+    // 尝试1: 使用 SHGetImageList 获取超大图标 (Jumbo/ExtraLarge)
+    // 首先获取系统图标索引
+    if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), 0, &shfi, sizeof(shfi), 
+                      SHGFI_SYSICONINDEX)) {
+        
+        IImageList *imageList = nullptr;
+        HRESULT hr = E_FAIL;
+        
+        // 优先尝试获取 Jumbo 图标 (256x256)
+        hr = SHGetImageList(SHIL_JUMBO, IID_IImageList_LOCAL, (void**)&imageList);
+        
+        // 如果失败，尝试获取 ExtraLarge 图标 (48x48)
+        if (FAILED(hr)) {
+            hr = SHGetImageList(SHIL_EXTRALARGE, IID_IImageList_LOCAL, (void**)&imageList);
         }
-    } else {
-        logToDesktop("SHGetFileInfo failed for: " + nativePath);
+
+        if (SUCCEEDED(hr) && imageList) {
+            HICON hIcon = nullptr;
+            // 获取图标
+            hr = imageList->GetIcon(shfi.iIcon, ILD_TRANSPARENT, &hIcon);
+            
+            if (SUCCEEDED(hr) && hIcon) {
+                QPixmap pixmap = QtWin::fromHICON(hIcon);
+                DestroyIcon(hIcon);
+                
+                if (!pixmap.isNull()) {
+                    // 裁剪可能的透明边框
+                    result = cropTransparent(pixmap);
+                }
+            }
+            imageList->Release();
+        }
     }
-    
-    // 尝试2: 通过文件属性
+
+    // 尝试2: 如果上面失败了，回退到标准的 SHGetFileInfo (通常是 32x32)
     if (result.isNull()) {
         memset(&shfi, 0, sizeof(shfi));
-        if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), FILE_ATTRIBUTE_NORMAL, &shfi, sizeof(shfi), 
-                          SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES)) {
+        if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), 0, &shfi, sizeof(shfi), 
+                          SHGFI_ICON | SHGFI_LARGEICON)) {
             QPixmap pixmap = QtWin::fromHICON(shfi.hIcon);
             DestroyIcon(shfi.hIcon);
             if (!pixmap.isNull()) {
-                 result = pixmap.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                 logToDesktop("Success with SHGetFileInfo (Attributes)");
+                result = pixmap; // 返回 32x32 图标
             }
         }
     }
     
-    // 尝试3: ExtractIconEx
+    // 尝试3: 通过 ExtractIconEx (针对 exe/dll)
     if (result.isNull() && (path.endsWith(".exe", Qt::CaseInsensitive) || path.endsWith(".dll", Qt::CaseInsensitive))) {
         HICON hIconLarge = NULL;
         UINT extracted = ExtractIconEx((const wchar_t*)nativePath.utf16(), 0, &hIconLarge, NULL, 1);
@@ -219,19 +332,12 @@ static QPixmap getWinIcon(const QString &path) {
             QPixmap pixmap = QtWin::fromHICON(hIconLarge);
             DestroyIcon(hIconLarge);
             if (!pixmap.isNull()) {
-                 result = pixmap.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                 logToDesktop("Success with ExtractIconEx");
+                 result = pixmap;
             }
-        } else {
-            logToDesktop("ExtractIconEx failed or 0 icons");
         }
     }
 
     CoUninitialize();
-    
-    if (result.isNull()) {
-        logToDesktop("ALL FAILED for: " + path);
-    }
     
     return result;
 }
@@ -542,6 +648,10 @@ void FenceWindow::addIcon(IconWidget *icon)
     });
 
     m_icons.append(icon);
+    
+    // 应用当前的文字显示设置
+    icon->setTextVisible(ConfigManager::instance()->iconTextVisible());
+    
     icon->setParent(m_contentArea);
     m_contentLayout->addWidget(icon);
     icon->show();
@@ -596,6 +706,14 @@ void FenceWindow::removeIcon(IconWidget *icon)
         m_contentLayout->removeWidget(icon);
         icon->deleteLater(); // 销毁对象
         emit geometryChanged(); // 触发保存
+    }
+}
+
+
+void FenceWindow::setIconTextVisible(bool visible)
+{
+    for (IconWidget *icon : m_icons) {
+        icon->setTextVisible(visible);
     }
 }
 
