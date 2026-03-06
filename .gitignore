@@ -1,0 +1,24 @@
+# Build artifacts
+debug/
+release/
+Makefile*
+*.o
+*.obj
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+.qmake.stash
+object_script.*
+
+# User specific files
+.qtcreator/
+*.pro.user
+
+# Local config and storage
+bin/config.ini
+bin/fences.json
+bin/fences_storage/
+bin/DeskGo.exe

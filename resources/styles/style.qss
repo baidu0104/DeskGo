@@ -1,0 +1,103 @@
+/* DeskGo 全局样式表 */
+
+/* 滚动条样式 */
+QScrollBar:vertical {
+    background: rgba(255, 255, 255, 0.05);
+    width: 8px;
+    border-radius: 4px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    background: rgba(255, 255, 255, 0.05);
+    height: 8px;
+    border-radius: 4px;
+    margin: 0;
+}
+
+QScrollBar::handle:horizontal {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    min-width: 30px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+
+/* 工具提示 */
+QToolTip {
+    background: rgba(50, 50, 55, 250);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+/* 输入框 */
+QLineEdit {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    color: #ffffff;
+    padding: 8px 12px;
+    font-size: 13px;
+    selection-background-color: rgba(100, 150, 255, 0.5);
+}
+
+QLineEdit:focus {
+    border-color: rgba(100, 150, 255, 0.6);
+    background: rgba(255, 255, 255, 0.1);
+}
+
+QLineEdit:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* 消息框 */
+QMessageBox {
+    background: rgba(40, 40, 45, 250);
+}
+
+QMessageBox QLabel {
+    color: #ffffff;
+}
+
+QMessageBox QPushButton {
+    background: rgba(100, 150, 255, 0.8);
+    border: none;
+    border-radius: 6px;
+    color: #ffffff;
+    padding: 8px 24px;
+    font-size: 13px;
+    min-width: 80px;
+}
+
+QMessageBox QPushButton:hover {
+    background: rgba(100, 150, 255, 1.0);
+}
+
+QMessageBox QPushButton:pressed {
+    background: rgba(80, 130, 235, 1.0);
+}
