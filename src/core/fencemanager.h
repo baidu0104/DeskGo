@@ -37,7 +37,10 @@ private slots:
     void onFenceDeleteRequested(FenceWindow *fence);
     void onNewFenceRequested();
     void onSettingsRequested();
+    void onAboutRequested();
     void onExitRequested();
+    void onBackupFencesRequested();
+    void onRestoreFencesRequested();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

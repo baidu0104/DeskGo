@@ -57,12 +57,19 @@ public:
     // 设置始终置顶模式
     void setAlwaysOnTop(bool onTop);
     bool isAlwaysOnTop() const { return m_alwaysOnTop; }
+    
+    // 获取所有活动的围栏窗口
+    static const QSet<FenceWindow*>& allFences() { return s_allFences; }
 
     // 设置图标文字显示
     void setIconTextVisible(bool visible);
     
     // 立即保存待处理的更改（停止定时器并触发保存）
     void flushPendingSave();
+    
+    // 仅停止保存定时器，不触发任何保存信号（用于还原场景，防止覆盖已还原数据）
+    void stopSaveTimer();
+
 
     // 序列化
     QJsonObject toJson() const;
@@ -109,6 +116,8 @@ private:
     static const int SNAP_THRESHOLD = 10; // 吸附阈值（像素）
     QPoint snapPositionToOtherFences(const QPoint& targetPos, const QSize& targetSize) const;
     QRect snapGeometryToOtherFences(const QRect& targetGeo, int resizeEdge) const;
+    // 缓存其他围栏尺寸以防止高频对象访问
+    QList<QRect> m_snapRectsCache;
 
     QString m_id;
     QLabel *m_titleLabel;
@@ -176,6 +185,10 @@ private:
     // 状态保存
     QTimer *m_saveTimer;
     void startTitleEdit();
+    
+    // 引导提示
+    QLabel *m_placeholderLabel = nullptr;
+    void updatePlaceholder();
 };
 
 #endif // FENCEWINDOW_H

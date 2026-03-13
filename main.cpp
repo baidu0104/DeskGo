@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
     
     // 设置应用程序信息
     a.setApplicationName("DeskGo");
-    a.setApplicationVersion("1.0.0");
+    a.setApplicationVersion("1.5.5");
     a.setOrganizationName("DeskGo");
 
     // 单实例检查

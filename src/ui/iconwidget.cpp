@@ -1,4 +1,5 @@
 #include "iconwidget.h"
+#include "fencewindow.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
@@ -205,6 +206,24 @@ void IconWidget::mouseMoveEvent(QMouseEvent *event)
         emit dragStarted();
         Qt::DropAction result = drag->exec(Qt::MoveAction);
         qDebug() << "[IconWidget] Drag finished, result:" << result;
+
+        // 增加“拖出恢复”功能：
+        // 如果拖拽动作被忽略（result == Qt::IgnoreAction），
+        // 且鼠标释放位置在任何围栏窗口之外，则视为用户想要将其拖回桌面。
+        if (result == Qt::IgnoreAction) {
+            QPoint globalPos = QCursor::pos();
+            bool outsideAll = true;
+            for (FenceWindow *fence : FenceWindow::allFences()) {
+                if (fence && fence->isVisible() && fence->geometry().contains(globalPos)) {
+                    outsideAll = false;
+                    break;
+                }
+            }
+            if (outsideAll) {
+                qDebug() << "[IconWidget] Dragged outside all fences, requesting restoration to desktop.";
+                emit removeRequested();
+            }
+        }
     }
     QWidget::mouseMoveEvent(event);
 }
@@ -360,7 +379,8 @@ void IconWidget::contextMenuEvent(QContextMenuEvent *event)
         emit removeRequested();
     } else if (selected == propertiesAction) {
 #ifdef Q_OS_WIN
-        SHELLEXECUTEINFOW sei = { sizeof(SHELLEXECUTEINFOW) };
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(SHELLEXECUTEINFOW);
         sei.fMask = SEE_MASK_INVOKEIDLIST;
         sei.hwnd = (HWND)window()->winId();
         sei.lpVerb = L"properties";

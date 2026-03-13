@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QRect>
+#include <QTimer>
 
 /**
  * @brief 配置管理器
@@ -45,8 +46,17 @@ public:
     // 存储路径：fences_storage 与配置文件在同目录下
     QString fencesStoragePath() const { return m_fencesStoragePath; }
 
-    // 保存/加载
-    void save();
+    // 真正的保存（防抖调用此方法）
+    void doSave();
+    
+    // 强制立即同步保存所有数据（建议在程序退出前调用）
+    void sync();
+    
+    // 阻止任何未完成或将来的写盘操作，丢弃所有更改
+    void stopSave();
+
+    // 加载/请求防抖保存
+    void requestSave();
     void load();
 
 signals:
@@ -61,10 +71,12 @@ private:
     void updateAutoStartRegistry(bool enabled);
 
     QSettings *m_settings;
+    QTimer *m_saveDebounceTimer;
     QString m_settingsPath;
     QString m_fencesPath;
     QString m_fencesStoragePath;
     
+    bool m_saveDisabled = false;
     bool m_autoStart = false;
     bool m_minimizeToTray = true;
     QString m_theme = "dark";

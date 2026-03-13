@@ -11,6 +11,12 @@
 #include <QMessageBox>
 #include <QStyle>
 #include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QFileDialog>
+#include <QProcess>
+#include <QDateTime>
+#include <QStandardPaths>
 #include <QCoreApplication>
 #include <QDebug>
 #include <QWidgetAction>
@@ -82,7 +88,8 @@ void FenceManager::shutdown()
         m_trayIcon = nullptr;
     }
     
-
+    // 强制同步所有配置到磁盘
+    ConfigManager::instance()->sync();
 }
 
 void FenceManager::setupTrayIcon()
@@ -195,28 +202,149 @@ void FenceManager::setupTrayIcon()
         return action;
     };
 
-    addCenteredAction("新建围栏", [this](){ onNewFenceRequested(); });
-    addCenteredAction("显示/隐藏全部围栏", [this](){
-        // 延迟执行，确保菜单关闭动画完成后再操作窗口
-        QTimer::singleShot(50, this, [this]() {
+    // ---- 围栏管理 ----
+    QMenu *fenceMenu = new QMenu("      围栏管理      ", m_trayMenu);
+    fenceMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    fenceMenu->setAttribute(Qt::WA_TranslucentBackground);
+    fenceMenu->setAttribute(Qt::WA_NoSystemBackground);
+    fenceMenu->setContentsMargins(1, 1, 1, 1);
+    
+    fenceMenu->setStyleSheet(R"(
+        QMenu {
+            background-color: rgba(45, 45, 50, 240);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 8px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
+        }
+        QMenu::item {
+            background: transparent;
+            color: #ffffff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            margin: 2px 4px;
+        }
+        QMenu::item:selected {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+    )");
+
+    QAction *newFenceAction = fenceMenu->addAction("  新建围栏  ");
+    connect(newFenceAction, &QAction::triggered, this, [this](){
+        QTimer::singleShot(10, this, [this]() {
+            onNewFenceRequested();
+        });
+    });
+
+    QAction *toggleFencesAction = fenceMenu->addAction(m_fencesVisible ? "  隐藏全部围栏  " : "  显示全部围栏  ");
+    connect(toggleFencesAction, &QAction::triggered, this, [this, toggleFencesAction](){
+        QTimer::singleShot(50, this, [this, toggleFencesAction]() {
             if (m_fencesVisible) {
                 hideAllFences();
             } else {
                 showAllFences();
             }
+            if (toggleFencesAction) {
+                toggleFencesAction->setText(m_fencesVisible ? "  隐藏全部围栏  " : "  显示全部围栏  ");
+            }
         });
     });
 
-    addCenteredAction(ConfigManager::instance()->iconTextVisible() ? "隐藏图标文字" : "显示图标文字", []() {
-         // 这里的 label 文本会在 ConfigManager 信号回调中自动更新
-         bool current = ConfigManager::instance()->iconTextVisible();
-         ConfigManager::instance()->setIconTextVisible(!current);
+    QAction *toggleTextAction = fenceMenu->addAction(ConfigManager::instance()->iconTextVisible() ? "  隐藏图标文字  " : "  显示图标文字  ");
+    connect(toggleTextAction, &QAction::triggered, this, [](){
+        QTimer::singleShot(10, []() {
+            bool current = ConfigManager::instance()->iconTextVisible();
+            ConfigManager::instance()->setIconTextVisible(!current);
+        });
     });
+
+    connect(fenceMenu, &QMenu::aboutToShow, this, [fenceMenu, toggleFencesAction, this]() {
+        if (toggleFencesAction) {
+            toggleFencesAction->setText(m_fencesVisible ? "  隐藏全部围栏  " : "  显示全部围栏  ");
+        }
+#ifdef Q_OS_WIN
+        QTimer::singleShot(10, fenceMenu, [fenceMenu]() {
+            if (!fenceMenu) return;
+            BlurHelper::enableRoundedCorners(fenceMenu, 12);
+            HWND hMenu = (HWND)fenceMenu->winId();
+            if (hMenu) {
+                SetForegroundWindow(hMenu);
+            }
+        });
+#endif
+    });
+
+    m_trayMenu->addMenu(fenceMenu);
+
+    m_trayMenu->addSeparator();
+
+    // ---- 围栏数据备份/还原 ----
+    // 由于是二级菜单，通过添加前导和后置空格实现近似居中效果
+    QMenu *dataMenu = new QMenu("      数据管理      ", m_trayMenu);
+    
+    // 修复二级菜单的黑角问题
+    dataMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    dataMenu->setAttribute(Qt::WA_TranslucentBackground);
+    dataMenu->setAttribute(Qt::WA_NoSystemBackground);
+    dataMenu->setContentsMargins(1, 1, 1, 1);
+    
+    // 为二级菜单应用和主菜单一致的独立圆角风格
+    dataMenu->setStyleSheet(R"(
+        QMenu {
+            background-color: rgba(45, 45, 50, 240);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 8px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
+        }
+        QMenu::item {
+            background: transparent;
+            color: #ffffff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            margin: 2px 4px;
+        }
+        QMenu::item:selected {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+    )");
+
+#ifdef Q_OS_WIN
+    connect(dataMenu, &QMenu::aboutToShow, this, [dataMenu]() {
+        QTimer::singleShot(10, dataMenu, [dataMenu]() {
+            if (!dataMenu) return;
+            BlurHelper::enableRoundedCorners(dataMenu, 12);
+            HWND hMenu = (HWND)dataMenu->winId();
+            if (hMenu) {
+                SetForegroundWindow(hMenu);
+            }
+        });
+    });
+#endif
+    
+    // 为二级菜单项也添加空格保持居中对齐感
+    QAction *backupAction = dataMenu->addAction("  备份围栏  ");
+    connect(backupAction, &QAction::triggered, this, [this](){
+        QTimer::singleShot(10, this, [this]() {
+            onBackupFencesRequested();
+        });
+    });
+    
+    QAction *restoreAction = dataMenu->addAction("  还原围栏  ");
+    connect(restoreAction, &QAction::triggered, this, [this](){
+        QTimer::singleShot(10, this, [this]() {
+            onRestoreFencesRequested();
+        });
+    });
+    
+    m_trayMenu->addMenu(dataMenu);
 
     m_trayMenu->addSeparator();
 
     // 修复标准项颜色并尽量通过空格平衡视觉
-    QAction *autoStartAction = m_trayMenu->addAction("开机自启动");
+    QAction *autoStartAction = m_trayMenu->addAction("开机自启");
     autoStartAction->setCheckable(true);
     autoStartAction->setChecked(ConfigManager::instance()->autoStart());
     connect(autoStartAction, &QAction::toggled, [](bool checked) {
@@ -225,15 +353,7 @@ void FenceManager::setupTrayIcon()
 
     m_trayMenu->addSeparator();
 
-    addCenteredAction("关于 DeskGo", []() {
-        QMessageBox::about(nullptr, "关于 DeskGo",
-            "<div style='text-align: center; font-family: Microsoft YaHei;'>"
-            "<h3>DeskGo</h3>"
-            "<p>桌面围栏管理工具</p>"
-            "<p>版本: 1.0.1</p>"
-            "</div>");
-    });
-
+    addCenteredAction("关于 DeskGo", [this]() { onAboutRequested(); });
     addCenteredAction("退出应用", [this](){ onExitRequested(); });
 
     m_trayIcon->setContextMenu(m_trayMenu);
@@ -243,24 +363,15 @@ void FenceManager::setupTrayIcon()
     m_trayIcon->show();
 
     // 监听配置变化，实时更新所有围栏
-    connect(ConfigManager::instance(), &ConfigManager::iconTextVisibleChanged, this, [this](bool visible) {
+    // 监听配置变化，实时更新所有围栏
+    connect(ConfigManager::instance(), &ConfigManager::iconTextVisibleChanged, this, [this, toggleTextAction](bool visible) {
         for (FenceWindow *fence : m_fences) {
             if (fence) fence->setIconTextVisible(visible);
         }
         
-        // 更新菜单项文字 (如果菜单正在显示，虽然通常点击后菜单就关了)
-        // 遍历 action 找到对应的并更新文字
-        QList<QAction*> actions = m_trayMenu->actions();
-        for (QAction *action : actions) {
-            QWidgetAction *wa = qobject_cast<QWidgetAction*>(action);
-            if (wa) {
-                QLabel *label = qobject_cast<QLabel*>(wa->defaultWidget());
-                if (label) {
-                    if (label->text().contains("图标文字")) {
-                         label->setText(visible ? "隐藏图标文字" : "显示图标文字");
-                    }
-                }
-            }
+        // 更新菜单项文字
+        if (toggleTextAction) {
+            toggleTextAction->setText(visible ? "  隐藏图标文字  " : "  显示图标文字  ");
         }
     });
 }
@@ -278,37 +389,13 @@ bool FenceManager::eventFilter(QObject *watched, QEvent *event)
             m_trayMenu->close();
             
             // 根据文本直接执行对应操作
-            if (text == "新建围栏") {
+            if (text == "关于 DeskGo") {
                 QTimer::singleShot(10, this, [this]() {
-                    onNewFenceRequested();
-                });
-            } else if (text == "显示/隐藏全部围栏") {
-                QTimer::singleShot(10, this, [this]() {
-                    if (m_fencesVisible) {
-                        hideAllFences();
-                    } else {
-                        showAllFences();
-                    }
-                });
-            } else if (text == "关于 DeskGo") {
-                QTimer::singleShot(10, this, []() {
-                    QMessageBox::about(nullptr, "关于 DeskGo",
-                        "<div style='text-align: center; font-family: Microsoft YaHei;'>"
-                        "<h3>DeskGo</h3>"
-                        "<p>桌面围栏管理工具</p>"
-                        "<p>版本: 1.0.1</p>"
-                        "</div>");
+                    onAboutRequested();
                 });
             } else if (text == "退出应用") {
                 QTimer::singleShot(10, this, [this]() {
                     onExitRequested();
-                });
-
-            } else if (text.contains("图标文字")) {
-                // 处理图标文字显示的切换
-                QTimer::singleShot(10, this, []() {
-                    bool current = ConfigManager::instance()->iconTextVisible();
-                    ConfigManager::instance()->setIconTextVisible(!current);
                 });
             }
             
@@ -345,7 +432,16 @@ void FenceManager::removeFence(FenceWindow *fence)
     if (fence && m_fences.contains(fence)) {
         // 先归还所有图标到桌面
         fence->restoreAllIcons();
-        
+
+        // 删除该围栏在 fences_storage 下的存储目录（图标快捷方式等）
+        QString fenceId = fence->id();
+        QString storagePath = ConfigManager::instance()->fencesStoragePath() + "/" + fenceId;
+        QDir storageDir(storagePath);
+        if (storageDir.exists()) {
+            storageDir.removeRecursively();
+            qDebug() << "[FenceManager] Removed storage for fence:" << fenceId;
+        }
+
         m_fences.removeOne(fence);
         fence->close();
         fence->deleteLater();
@@ -462,8 +558,186 @@ void FenceManager::onSettingsRequested()
     // 设置对话框（可扩展）
 }
 
+void FenceManager::onAboutRequested()
+{
+    QMessageBox::about(nullptr, "关于 DeskGo",
+        "<div style='text-align: center; font-family: Microsoft YaHei;'>"
+        "<h3>DeskGo</h3>"
+        "<p>桌面图标管理工具</p>"
+        "<p>版本: " + qApp->applicationVersion() + "</p>"
+        "</div>");
+}
+
 void FenceManager::onExitRequested()
 {
     shutdown();
+    QApplication::quit();
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 围栏数据备份
+// 将 fencing_config.json 和 fences_storage 目录打包为 .zip
+// 依赖 Windows PowerShell Compress-Archive（无需第三方库）
+// ─────────────────────────────────────────────────────────────────
+void FenceManager::onBackupFencesRequested()
+{
+    // 先强制保存当前数据，确保备份的是最新状态
+    saveFences();
+    ConfigManager::instance()->sync();
+
+    // 弹出保存对话框
+    QString defaultName = QString("DeskGo_backup_%1.zip")
+        .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString savePath = QFileDialog::getSaveFileName(
+        nullptr,
+        "备份围栏数据",
+        QStandardPaths::writableLocation(QStandardPaths::DesktopLocation) + "/" + defaultName,
+        "备份文件 (*.zip)"
+    );
+
+    if (savePath.isEmpty()) return;
+    if (!savePath.endsWith(".zip", Qt::CaseInsensitive)) savePath += ".zip";
+
+    // 删除已存在的目标文件
+    if (QFile::exists(savePath)) QFile::remove(savePath);
+
+    QString configPath    = ConfigManager::instance()->fencesStoragePath();
+    // fencesStoragePath: ...AppData/Local/DeskGo/fences_storage
+    // fencing_config.json 在其上一级
+    QDir storageDir(configPath);
+    storageDir.cdUp();
+    QString appDataDir = storageDir.absolutePath(); // .../AppData/Local/DeskGo
+
+    QString fencesJson   = appDataDir + "/fencing_config.json";
+    QString fencesStorage = appDataDir + "/fences_storage";
+
+    // 构建 PowerShell 命令：把两个条目都打包进 zip
+    // Compress-Archive 支持多路径输入（数组）
+    QString psCmd = QString(
+        "$items = @(); "
+        "if (Test-Path '%1') { $items += '%1' }; "
+        "if (Test-Path '%2') { $items += '%2' }; "
+        "if ($items.Count -gt 0) { Compress-Archive -Path $items -DestinationPath '%3' -Force } "
+        "else { Write-Error 'No source files found' }"
+    ).arg(fencesJson, fencesStorage, savePath);
+
+    QProcess proc;
+    proc.setProgram("powershell.exe");
+    proc.setArguments({"-NonInteractive", "-NoProfile", "-Command", psCmd});
+    proc.start();
+    proc.waitForFinished(30000); // 最多等 30 秒
+
+    if (proc.exitCode() == 0 && QFile::exists(savePath)) {
+        QMessageBox::information(nullptr, "备份成功", "围栏数据已成功备份。");
+    } else {
+        QString errMsg = QString::fromUtf8(proc.readAllStandardError());
+        QMessageBox::critical(nullptr, "备份失败",
+            QString("备份围栏数据时出错：\n%1").arg(errMsg.isEmpty() ? "未知错误" : errMsg));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 围栏数据还原
+// 从 .zip 中解压并覆盖 AppData 目录下的围栏数据，然后重启应用
+// ─────────────────────────────────────────────────────────────────
+void FenceManager::onRestoreFencesRequested()
+{
+    QString zipPath = QFileDialog::getOpenFileName(
+        nullptr,
+        "还原围栏数据",
+        QStandardPaths::writableLocation(QStandardPaths::DesktopLocation),
+        "备份文件 (*.zip)"
+    );
+
+    if (zipPath.isEmpty()) return;
+    if (!QFile::exists(zipPath)) {
+        QMessageBox::warning(nullptr, "文件不存在", "所选备份文件不存在，请重新选择。");
+        return;
+    }
+
+    int ret = QMessageBox::warning(
+        nullptr,
+        "确认还原",
+        "还原操作将覆盖当前所有围栏数据，应用随后将自动重启。\n\n确定要继续吗？",
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No
+    );
+    if (ret != QMessageBox::Yes) return;
+
+    QString configPath    = ConfigManager::instance()->fencesStoragePath();
+    QDir storageDir(configPath);
+    storageDir.cdUp();
+    QString appDataDir = storageDir.absolutePath();
+
+    // 先删除旧数据
+    QString oldJson    = appDataDir + "/fencing_config.json";
+    QString oldStorage = appDataDir + "/fences_storage";
+
+    // 关键修复：阻止应用内正在进行的任何异步保存写入动作
+    // 否则它们可能会在 Expand-Archive 解压之后被写入，覆盖掉我们刚刚还原好的数据！
+    ConfigManager::instance()->stopSave();
+
+    // PowerShell：解压到 AppData 目录，自动覆盖
+    // Expand-Archive 会把 zip 内容解压到目标目录
+    QString psCmd = QString(
+        "Expand-Archive -Path '%1' -DestinationPath '%2' -Force"
+    ).arg(zipPath, appDataDir);
+
+    QProcess proc;
+    proc.setProgram("powershell.exe");
+    proc.setArguments({"-NonInteractive", "-NoProfile", "-Command", psCmd});
+    proc.start();
+    proc.waitForFinished(30000);
+
+    if (proc.exitCode() != 0) {
+        QString errMsg = QString::fromUtf8(proc.readAllStandardError());
+        QMessageBox::critical(nullptr, "还原失败",
+            QString("还原围栏数据时出错：\n%1").arg(errMsg.isEmpty() ? "未知错误" : errMsg));
+        return;
+    }
+
+    // 验证关键文件存在
+    bool jsonOk    = QFile::exists(oldJson);
+    bool storageOk = QDir(oldStorage).exists();
+
+    if (!jsonOk && !storageOk) {
+        QMessageBox::warning(nullptr, "还原警告",
+            "备份文件似乎不包含有效的围栏数据（fencing_config.json 和 fences_storage 均未找到）。\n"
+            "请确认选择了正确的 DeskGo 备份文件。");
+        return;
+    }
+
+    QMessageBox::information(nullptr, "还原成功",
+        "围栏数据已成功还原！\n应用即将重启以加载新数据。");
+
+    // ⚠️  关键：不能调用 shutdown()！
+    //
+    // shutdown() 内部会调用 ConfigManager::sync()，把当前内存中的
+    // 旧围栏数据写回磁盘，从而覆盖掉刚刚解压好的 fencing_config.json。
+    // 修复方案：直接设置 m_isShutdown 旗标，阻止任何待定保存写入，
+    // 然后隐藏托盘图标，启动新进程后让当前进程直接退出即可。
+    //
+    // 进程退出时操作系统会自动回收所有窗口/句柄，无需手动 close()。
+
+    m_isShutdown = true; // 阻止任何后续的自动保存
+
+    // 停止所有围栏的待定保存定时器
+    // 注意：不调用 flushPendingSave()，因为它会 emit geometryChanged()
+    // 触发 saveFences() 更新 m_fencesData，有潜在覆盖风险。
+    // 此处只需停止定时器，阻止任何写盘动作即可。
+    for (FenceWindow *fence : m_fences) {
+        if (fence) fence->stopSaveTimer(); // 只停计时器，不触发保存
+    }
+
+    // 隐藏托盘图标（让任务栏立即干净）
+    if (m_trayIcon) {
+        m_trayIcon->hide();
+    }
+
+    // 启动新实例
+    QString appExe = QCoreApplication::applicationFilePath();
+    QProcess::startDetached(appExe, QStringList());
+
+    // 直接退出，不写任何数据到磁盘
     QApplication::quit();
 }

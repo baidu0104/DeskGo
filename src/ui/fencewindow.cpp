@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QMenu>
 #include <QJsonObject>
+#include <QtConcurrent>
 #include <QJsonArray>
 #include <QScreen>
 #include <QApplication>
@@ -520,6 +521,24 @@ void FenceWindow::setupUi()
     // 启用鼠标追踪并安装事件过滤器，以便在子控件上悬浮时也能更新光标
     m_contentArea->setMouseTracking(true);
     m_contentArea->installEventFilter(this);
+
+    // 初始化空状态引导文字
+    m_placeholderLabel = new QLabel(m_contentArea);
+    m_placeholderLabel->setText("整理桌面，从这里开启");
+    m_placeholderLabel->setAlignment(Qt::AlignCenter);
+    m_placeholderLabel->setStyleSheet(R"(
+        QLabel {
+            color: rgba(255, 255, 255, 0.7);
+            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            font-size: 15px;
+            font-weight: 400;
+            letter-spacing: 2px;
+            background: transparent;
+        }
+    )");
+    m_placeholderLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    
+    updatePlaceholder();
 }
 
 void FenceWindow::setupBlurEffect()
@@ -577,6 +596,11 @@ void FenceWindow::resizeEvent(QResizeEvent *event)
     // 更新 Expanded Height (仅在展开状态下更新)
     if (!m_collapsed) {
         m_expandedHeight = height();
+    }
+
+    // 更新占位提示位置
+    if (m_placeholderLabel) {
+        m_placeholderLabel->setGeometry(m_contentArea->rect());
     }
 
     // 触发保存（使用防抖动延迟）
@@ -731,6 +755,7 @@ void FenceWindow::addIcon(IconWidget *icon)
     
     logToDesktop("  Icon successfully added to layout. Count: " + QString::number(m_icons.size()));
     
+    updatePlaceholder();
     emit geometryChanged(); // 保存更改
 }
 
@@ -864,6 +889,8 @@ void FenceWindow::removeIcon(IconWidget *icon)
         m_contentLayout->removeWidget(icon);
         icon->hide();
         icon->deleteLater();
+        
+        updatePlaceholder();
         emit geometryChanged();
     }
 }
@@ -884,6 +911,16 @@ void FenceWindow::flushPendingSave()
         emit geometryChanged();
     }
 }
+
+void FenceWindow::stopSaveTimer()
+{
+    // 仅停止定时器，不 emit geometryChanged()
+    // 防止在还原流程中触发 saveFences() 覆盖已还原的磁盘数据
+    if (m_saveTimer && m_saveTimer->isActive()) {
+        m_saveTimer->stop();
+    }
+}
+
 
 void FenceWindow::restoreAllIcons()
 {
@@ -1001,136 +1038,138 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
     QString storageRoot = ConfigManager::instance()->fencesStoragePath();
     QDir rootDir(storageRoot);
 
+    // 提取解析逻辑至后台线程
+    // 我们先收集要处理的文件列表和配置
+    struct IconTask {
+        QString name;
+        QString savedPath;
+        bool isFromDesktop = false;
+        QPoint originalPos;
+    };
+    
+    QList<IconTask> tasks;
     for (const QJsonValue &val : iconsArray) {
         QJsonObject iconObj = val.toObject();
-        QString savedPath = iconObj["path"].toString();
-        QString name = iconObj["name"].toString();
-        
-        logToDesktop("[fromJson] Processing icon: " + name + " (savedPath: " + savedPath + ")");
-        
-        QString path = fromStoragePath(savedPath, fence->id());
-        logToDesktop("[fromJson] Resolved path: " + path);
-        
-        QFileInfo fileInfo(path);
-        fileInfo.refresh(); // 刷新文件信息缓存
-        
-        bool exists = fileInfo.exists();
-        logToDesktop("[fromJson] QFileInfo::exists() = " + QString(exists ? "true" : "false"));
-        
-        // 如果 Qt 检测失败，使用 Windows API 直接检测
-        if (!exists) {
-#ifdef Q_OS_WIN
-            std::wstring wPath = path.toStdWString();
-            DWORD attr = GetFileAttributesW(wPath.c_str());
-            if (attr != INVALID_FILE_ATTRIBUTES) {
-                exists = true;
-                // 重新设置 fileInfo，强制刷新
-                fileInfo.setFile(path);
-                fileInfo.refresh();
-                logToDesktop("[fromJson] Windows API detected file exists! Refreshed fileInfo, now exists = " + QString(fileInfo.exists() ? "true" : "false"));
-            } else {
-                logToDesktop("[fromJson] Windows API also failed, error: " + QString::number(GetLastError()));
-            }
-#endif
+        IconTask task;
+        task.name = iconObj["name"].toString();
+        task.savedPath = iconObj["path"].toString();
+        if (iconObj.contains("isFromDesktop") && iconObj["isFromDesktop"].toBool()) {
+            task.isFromDesktop = true;
+            task.originalPos = QPoint(iconObj["originalX"].toInt(), iconObj["originalY"].toInt());
         }
-        
-        logToDesktop("[fromJson] Final exists check: " + QString(exists ? "true" : "false"));
-
-        // 如果路径不存在，尝试终极修复策略
-        if (!exists) {
-            QString fileName = fileInfo.fileName();
-            if (fileName.isEmpty()) fileName = name + ".lnk"; // 兜底补全扩展名
-
-            bool fixed = false;
-
-            // 策略1：在当前围栏存储目录下匹配文件名
-            QString autoPath = QDir::toNativeSeparators(QDir::cleanPath(storageBase + "/" + fileName));
-            if (QFile::exists(autoPath)) {
-                path = autoPath;
-                fixed = true;
-                logToDesktop("[fromJson] FIXED via local storageBase match: " + path);
-            }
-            
-            // 策略2：全局搜索恢复 (解决 ID 变动或文件夹错乱问题)
-            if (!fixed) {
-                logToDesktop("[fromJson] Path missing, starting GLOBAL search for: " + fileName);
-                QStringList subDirs = rootDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-                for (const QString& subDir : subDirs) {
-                    QString searchPath = QDir::toNativeSeparators(QDir::cleanPath(storageRoot + "/" + subDir + "/" + fileName));
-                    if (QFile::exists(searchPath)) {
-                        path = searchPath;
-                        fixed = true;
-                        logToDesktop("[fromJson] GLOBAL SEARCH SUCCESS! Found at: " + path);
-                        break;
-                    }
-                }
-            }
-            
-            if (fixed) fileInfo.setFile(path);
-        }
-
-        // 使用 exists 变量而不是 fileInfo.exists()，因为 Qt 可能无法识别某些文件
-        if (exists || fileInfo.exists()) {
-             IconWidget::IconData data;
-             data.name = name;
-             data.path = QDir::toNativeSeparators(QDir::cleanPath(path));
-             data.targetPath = data.path;
-             
-             logToDesktop("[fromJson] Loading icon for: " + data.path);
-             
-             data.icon = getWinIcon(data.path);
-             logToDesktop("[fromJson] getWinIcon result: " + QString(data.icon.isNull() ? "NULL" : "OK, size: " + QString::number(data.icon.width()) + "x" + QString::number(data.icon.height())));
-             
-             if (data.icon.isNull()) {
-                 data.icon = iconProvider.icon(fileInfo).pixmap(48, 48);
-                 logToDesktop("[fromJson] iconProvider fallback result: " + QString(data.icon.isNull() ? "NULL" : "OK"));
-             }
-             
-             if (iconObj.contains("isFromDesktop") && iconObj["isFromDesktop"].toBool()) {
-                 data.isFromDesktop = true;
-                 data.originalPosition = QPoint(iconObj["originalX"].toInt(), iconObj["originalY"].toInt());
-             }
-
-             IconWidget *icon = new IconWidget(data);
-             
-             // 如果 getWinIcon 和 iconProvider 都没能拿到图标，setData 会再次尝试 fallback
-             if (data.icon.isNull()) {
-                 logToDesktop("[fromJson] Icon still NULL, calling setData for fallback");
-                 icon->setData(data);
-             }
-             
-             fence->addIcon(icon);
-             logToDesktop("[fromJson] Icon added successfully");
-        } else {
-            logToDesktop("[fromJson] FATAL: File really not found anywhere: " + path);
-        }
+        tasks.append(task);
+    }
+    
+    // 强制先显示一个空窗口（避免启动时卡出白板）
+    fence->show();
+    fence->m_contentArea->show();
+    if (!fence->m_collapsed) fence->m_contentArea->raise();
+    
+    if (tasks.isEmpty()) {
+        return fence;
     }
 
-    // 强制显示并刷新
-    QTimer::singleShot(500, fence, [fence]() {
-        fence->show();
+    // 后台并发执行图标读取
+    QFutureWatcher<QList<IconWidget::IconData>>* watcher = new QFutureWatcher<QList<IconWidget::IconData>>(fence);
+    // fence 是这个 watcher 的 parent，即使 fence 销毁 watcher 也会随之释放
+
+    QObject::connect(watcher, &QFutureWatcher<QList<IconWidget::IconData>>::finished, fence, [fence, watcher]() {
+        QList<IconWidget::IconData> results = watcher->result();
+        for (const auto& data : results) {
+            IconWidget *icon = new IconWidget(data);
+            if (data.icon.isNull()) {
+                icon->setData(data); // 内部仍有后备 fallback
+            }
+            fence->addIcon(icon);
+        }
+        
+        // 最后统一强制刷新布局
         if (fence->m_contentLayout) {
             fence->m_contentLayout->invalidate();
             fence->m_contentArea->updateGeometry();
             fence->m_contentArea->update();
-            
-            // 额外针对每个图标调用一次强制更新，解决部分高 DPI 下的渲染滞后
             for (IconWidget* icon : fence->m_icons) {
                 icon->update();
                 icon->show();
             }
         }
-        
-        // 如果不是由于折叠隐藏，确保可见并提升层级
-        if (!fence->m_collapsed) {
-            fence->m_contentArea->show();
-            fence->m_contentArea->raise();
-        }
-        
-        logToDesktop("[fromJson] Force 500ms post-show update triggered for icons.");
+        logToDesktop("[fromJson] All async icons restored for: " + fence->title());
+        watcher->deleteLater();
     });
 
-    logToDesktop("[fromJson] Finished loading icons for: " + fence->title());
+    QString fenceId = fence->id();
+    auto parseTask = [fenceId, storageBase, storageRoot, tasks]() -> QList<IconWidget::IconData> {
+        QList<IconWidget::IconData> loadedDatas;
+        QDir rootDir(storageRoot);
+        QFileIconProvider iconProvider;
+
+        for (const auto& task : tasks) {
+            QString path = fromStoragePath(task.savedPath, fenceId);
+            QFileInfo fileInfo(path);
+            
+            bool exists = fileInfo.exists();
+            if (!exists) {
+#ifdef Q_OS_WIN
+                std::wstring wPath = path.toStdWString();
+                DWORD attr = GetFileAttributesW(wPath.c_str());
+                if (attr != INVALID_FILE_ATTRIBUTES) {
+                    exists = true;
+                    fileInfo.setFile(path);
+                    fileInfo.refresh();
+                }
+#endif
+            }
+            
+            if (!exists) {
+                QString fileName = fileInfo.fileName();
+                if (fileName.isEmpty()) fileName = task.name + ".lnk"; 
+
+                bool fixed = false;
+                QString autoPath = QDir::toNativeSeparators(QDir::cleanPath(storageBase + "/" + fileName));
+                if (QFile::exists(autoPath)) {
+                    path = autoPath;
+                    fixed = true;
+                }
+                
+                if (!fixed) {
+                    QStringList subDirs = rootDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+                    for (const QString& subDir : subDirs) {
+                        QString searchPath = QDir::toNativeSeparators(QDir::cleanPath(storageRoot + "/" + subDir + "/" + fileName));
+                        if (QFile::exists(searchPath)) {
+                            path = searchPath;
+                            fixed = true;
+                            break;
+                        }
+                    }
+                }
+                if (fixed) fileInfo.setFile(path);
+            }
+
+            if (exists || fileInfo.exists()) {
+                 IconWidget::IconData data;
+                 data.name = task.name;
+                 data.path = QDir::toNativeSeparators(QDir::cleanPath(path));
+                 data.targetPath = data.path;
+                 
+                 data.icon = getWinIcon(data.path);
+                 if (data.icon.isNull()) {
+                     data.icon = iconProvider.icon(fileInfo).pixmap(48, 48);
+                 }
+                 
+                 if (task.isFromDesktop) {
+                     data.isFromDesktop = true;
+                     data.originalPosition = task.originalPos;
+                 }
+                 loadedDatas.append(data);
+            }
+        }
+        return loadedDatas;
+    };
+
+    QFuture<QList<IconWidget::IconData>> future = QtConcurrent::run(parseTask);
+    watcher->setFuture(future);
+
+    logToDesktop("[fromJson] Spawned async icon loading for: " + fence->title());
     return fence;
 }
 
@@ -1420,11 +1459,8 @@ QPoint FenceWindow::snapPositionToOtherFences(const QPoint& targetPos, const QSi
     int myTop = targetPos.y();
     int myBottom = targetPos.y() + targetSize.height();
     
-    // 遍历所有其他围栏
-    for (FenceWindow* other : s_allFences) {
-        if (other == this) continue;
-        
-        QRect otherRect = other->geometry();
+    // 遍历所有其他围栏的缓存
+    for (const QRect& otherRect : m_snapRectsCache) {
         int otherLeft = otherRect.left();
         int otherRight = otherRect.right() + 1; // Qt的right()是width()-1
         int otherTop = otherRect.top();
@@ -1491,11 +1527,8 @@ QRect FenceWindow::snapGeometryToOtherFences(const QRect& targetGeo, int resizeE
 {
     QRect snappedGeo = targetGeo;
     
-    // 遍历所有其他围栏
-    for (FenceWindow* other : s_allFences) {
-        if (other == this) continue;
-        
-        QRect otherRect = other->geometry();
+    // 遍历所有其他围栏缓存
+    for (const QRect& otherRect : m_snapRectsCache) {
         int otherLeft = otherRect.left();
         int otherRight = otherRect.right() + 1;
         int otherTop = otherRect.top();
@@ -1562,8 +1595,15 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
         m_resizeStartSize = size();
         m_resizeStartGeo = geometry();
         
-        // 边缘检测
+        // 记录拖曳/调整前的几何状态并刷新吸咐缓存
         m_resizeEdge = None;
+        m_snapRectsCache.clear();
+        for (FenceWindow* other : s_allFences) {
+            if (other != this) {
+                m_snapRectsCache.append(other->geometry());
+            }
+        }
+
         int x = event->x();
         int y = event->y();
         int w = width();
@@ -2585,5 +2625,15 @@ bool FenceWindow::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QWidget::eventFilter(watched, event);
+}
+
+void FenceWindow::updatePlaceholder()
+{
+    if (m_placeholderLabel) {
+        m_placeholderLabel->setVisible(m_icons.isEmpty());
+        if (m_placeholderLabel->isVisible()) {
+            m_placeholderLabel->setGeometry(m_contentArea->rect());
+        }
+    }
 }
 

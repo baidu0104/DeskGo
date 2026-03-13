@@ -133,16 +133,23 @@ int FlowLayout::doLayout(const QRect &rect, bool testOnly) const
     int y = effectiveRect.y();
     int lineHeight = 0;
 
+    // 提前在循环外计算控件提供的默认 spacing，避免循环内的高频阻塞
+    int defaultSpaceX = -1;
+    int defaultSpaceY = -1;
+    if (!m_itemList.isEmpty()) {
+        const QWidget *wid = m_itemList.first()->widget();
+        if (wid) {
+            defaultSpaceX = wid->style()->layoutSpacing(QSizePolicy::PushButton, QSizePolicy::PushButton, Qt::Horizontal);
+            defaultSpaceY = wid->style()->layoutSpacing(QSizePolicy::PushButton, QSizePolicy::PushButton, Qt::Vertical);
+        }
+    }
+
     for (QLayoutItem *item : qAsConst(m_itemList)) {
-        const QWidget *wid = item->widget();
         int spaceX = horizontalSpacing();
-        if (spaceX == -1)
-            spaceX = wid->style()->layoutSpacing(
-                QSizePolicy::PushButton, QSizePolicy::PushButton, Qt::Horizontal);
+        if (spaceX == -1) spaceX = (defaultSpaceX != -1) ? defaultSpaceX : 0;
+            
         int spaceY = verticalSpacing();
-        if (spaceY == -1)
-            spaceY = wid->style()->layoutSpacing(
-                QSizePolicy::PushButton, QSizePolicy::PushButton, Qt::Vertical);
+        if (spaceY == -1) spaceY = (defaultSpaceY != -1) ? defaultSpaceY : 0;
 
         int nextX = x + item->sizeHint().width() + spaceX;
         if (nextX - spaceX > effectiveRect.right() && lineHeight > 0) {
