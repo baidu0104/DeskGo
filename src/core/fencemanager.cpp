@@ -50,8 +50,26 @@ void FenceManager::initialize()
 {
     setupTrayIcon();
     loadFences();
-    
     showAllFences();
+
+    // ── 监听显示器配置变化 ──────────────────────────────────────────
+    // 连接已存在屏幕的几何变化信号
+    for (QScreen *screen : QApplication::screens()) {
+        connect(screen, &QScreen::geometryChanged,
+                this, &FenceManager::onScreenConfigChanged);
+    }
+    // 新接入显示器时，连接其信号并触发一次检查
+    connect(qApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
+        connect(screen, &QScreen::geometryChanged,
+                this, &FenceManager::onScreenConfigChanged);
+        onScreenConfigChanged();
+    });
+    // 拔出显示器时触发检查
+    connect(qApp, &QGuiApplication::screenRemoved,
+            this, &FenceManager::onScreenConfigChanged);
+    // 主屏切换时触发检查
+    connect(qApp, &QGuiApplication::primaryScreenChanged,
+            this, &FenceManager::onScreenConfigChanged);
 }
 
 void FenceManager::shutdown()
@@ -67,11 +85,7 @@ void FenceManager::shutdown()
     
     // 等待一小段时间，确保所有信号都被处理
     QCoreApplication::processEvents();
-    
-    // 注意：不要在这里再次保存，因为可能没有足够的时间完成
-    // 所有的更改都应该在实时保存中完成
 
-    
     // 关闭所有围栏
     for (FenceWindow *fence : m_fences) {
         if (fence) {
@@ -130,275 +144,229 @@ void FenceManager::setupTrayIcon()
     m_trayMenu = new QMenu();
     m_trayMenu->setAttribute(Qt::WA_TranslucentBackground);
     m_trayMenu->setAttribute(Qt::WA_NoSystemBackground);
-    // 给边框留出 1px 的边距，防止边缘毛刺
     m_trayMenu->setContentsMargins(1, 1, 1, 1);
-    
     m_trayMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
-    
-    m_trayMenu->setStyleSheet(R"(
+
+    // 统一样式表
+    const QString kMenuStyle = R"(
         QMenu {
             background-color: rgba(45, 45, 50, 240);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 12px;
             padding: 8px;
-            font-family: "Microsoft YaHei", "Segoe UI";
-            font-size: 13px;
         }
         QMenu::item {
             background: transparent;
             color: #ffffff;
-            padding: 6px 16px;
+            padding: 8px 24px;
             border-radius: 6px;
             margin: 2px 4px;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
         }
         QMenu::item:selected {
             background-color: rgba(255, 255, 255, 0.1);
-        }
-        QLabel#menuItemLabel {
-            color: #ffffff;
-            padding: 8px 20px;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: bold;
-            font-family: "Microsoft YaHei", "Segoe UI";
-        }
-        QLabel#menuItemLabel:hover {
-            background: rgba(255, 255, 255, 0.1);
         }
         QMenu::separator {
             height: 1px;
             background: rgba(255, 255, 255, 0.1);
             margin: 6px 12px;
         }
-    )");
+        QLabel#actionLabel {
+            color: #ffffff;
+            font-family: "Microsoft YaHei", "Segoe UI";
+            font-size: 13px;
+            border-radius: 6px;
+            padding: 8px 0px;
+            background: transparent;
+        }
+        QLabel#actionLabel:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+    )";
+    m_trayMenu->setStyleSheet(kMenuStyle);
+
+    // 二级菜单专属样式（减少 padding）
+    const QString kSubMenuStyle = kMenuStyle + R"(
+        QMenu::item {
+            padding: 8px 12px;
+        }
+    )";
 
 #ifdef Q_OS_WIN
     connect(m_trayMenu, &QMenu::aboutToShow, this, [this]() {
         QTimer::singleShot(10, this, [this]() {
             if (!m_trayMenu) return;
-            // 物理裁剪圆角 (解决黑点问题)
             BlurHelper::enableRoundedCorners(m_trayMenu, 12);
-            
-            HWND hMenu = (HWND)m_trayMenu->winId();
-            if (hMenu) {
-                SetForegroundWindow(hMenu);
-            }
+            SetForegroundWindow((HWND)m_trayMenu->winId());
         });
     });
 #endif
 
-    auto addCenteredAction = [this](const QString &text, const std::function<void()> &callback) {
-        QWidgetAction *action = new QWidgetAction(m_trayMenu);
-        QLabel *label = new QLabel(text);
-        label->setObjectName("menuItemLabel");
-        label->setAlignment(Qt::AlignCenter);
-        label->setCursor(Qt::PointingHandCursor);
-        action->setDefaultWidget(label);
-        
-        connect(action, &QAction::triggered, this, callback);
-        label->installEventFilter(this);
-        
-        m_trayMenu->addAction(action);
-        return action;
+    // 统一创建居中 QWidgetAction 的助手（无需任何 spacer）
+    auto addCenteredAction = [&](const QString &text) -> QLabel* {
+        QWidgetAction *wa = new QWidgetAction(m_trayMenu);
+        QLabel *lbl = new QLabel(text);
+        lbl->setObjectName("actionLabel");
+        lbl->setAlignment(Qt::AlignCenter);
+        lbl->setCursor(Qt::PointingHandCursor);
+        lbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        lbl->installEventFilter(this);
+        wa->setDefaultWidget(lbl);
+        m_trayMenu->addAction(wa);
+        return lbl;
     };
 
-    // ---- 围栏管理 ----
-    QMenu *fenceMenu = new QMenu("      围栏管理      ", m_trayMenu);
+    // ---- 围栏管理子菜单 ----
+    QMenu *fenceMenu = new QMenu("围栏管理", m_trayMenu);
     fenceMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
     fenceMenu->setAttribute(Qt::WA_TranslucentBackground);
     fenceMenu->setAttribute(Qt::WA_NoSystemBackground);
     fenceMenu->setContentsMargins(1, 1, 1, 1);
-    
-    fenceMenu->setStyleSheet(R"(
-        QMenu {
-            background-color: rgba(45, 45, 50, 240);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 8px;
-            font-family: "Microsoft YaHei", "Segoe UI";
-            font-size: 13px;
-        }
-        QMenu::item {
-            background: transparent;
-            color: #ffffff;
-            padding: 8px 16px;
-            border-radius: 6px;
-            margin: 2px 4px;
-        }
-        QMenu::item:selected {
-            background-color: rgba(255, 255, 255, 0.1);
-        }
-    )");
+    fenceMenu->setStyleSheet(kSubMenuStyle);
 
-    QAction *newFenceAction = fenceMenu->addAction("  新建围栏  ");
-    connect(newFenceAction, &QAction::triggered, this, [this](){
-        QTimer::singleShot(10, this, [this]() {
-            onNewFenceRequested();
-        });
+    QAction *newFenceAction     = fenceMenu->addAction("新建围栏");
+    QAction *toggleFencesAction = fenceMenu->addAction(m_fencesVisible ? "隐藏全部围栏" : "显示全部围栏");
+    QAction *toggleTextAction   = fenceMenu->addAction(ConfigManager::instance()->iconTextVisible() ? "隐藏图标文字" : "显示图标文字");
+
+    connect(newFenceAction, &QAction::triggered, this, [this]() {
+        QTimer::singleShot(10, this, [this]() { onNewFenceRequested(); });
     });
-
-    QAction *toggleFencesAction = fenceMenu->addAction(m_fencesVisible ? "  隐藏全部围栏  " : "  显示全部围栏  ");
-    connect(toggleFencesAction, &QAction::triggered, this, [this, toggleFencesAction](){
+    connect(toggleFencesAction, &QAction::triggered, this, [this, toggleFencesAction]() {
         QTimer::singleShot(50, this, [this, toggleFencesAction]() {
-            if (m_fencesVisible) {
-                hideAllFences();
-            } else {
-                showAllFences();
-            }
-            if (toggleFencesAction) {
-                toggleFencesAction->setText(m_fencesVisible ? "  隐藏全部围栏  " : "  显示全部围栏  ");
-            }
+            m_fencesVisible ? hideAllFences() : showAllFences();
+            if (toggleFencesAction)
+                toggleFencesAction->setText(m_fencesVisible ? "隐藏全部围栏" : "显示全部围栏");
         });
     });
-
-    QAction *toggleTextAction = fenceMenu->addAction(ConfigManager::instance()->iconTextVisible() ? "  隐藏图标文字  " : "  显示图标文字  ");
-    connect(toggleTextAction, &QAction::triggered, this, [](){
+    connect(toggleTextAction, &QAction::triggered, this, []() {
         QTimer::singleShot(10, []() {
-            bool current = ConfigManager::instance()->iconTextVisible();
-            ConfigManager::instance()->setIconTextVisible(!current);
+            ConfigManager::instance()->setIconTextVisible(!ConfigManager::instance()->iconTextVisible());
         });
     });
 
-    connect(fenceMenu, &QMenu::aboutToShow, this, [fenceMenu, toggleFencesAction, this]() {
-        if (toggleFencesAction) {
-            toggleFencesAction->setText(m_fencesVisible ? "  隐藏全部围栏  " : "  显示全部围栏  ");
-        }
 #ifdef Q_OS_WIN
+    connect(fenceMenu, &QMenu::aboutToShow, this, [fenceMenu, toggleFencesAction, this]() {
+        if (toggleFencesAction)
+            toggleFencesAction->setText(m_fencesVisible ? "隐藏全部围栏" : "显示全部围栏");
         QTimer::singleShot(10, fenceMenu, [fenceMenu]() {
             if (!fenceMenu) return;
             BlurHelper::enableRoundedCorners(fenceMenu, 12);
-            HWND hMenu = (HWND)fenceMenu->winId();
-            if (hMenu) {
-                SetForegroundWindow(hMenu);
-            }
+            SetForegroundWindow((HWND)fenceMenu->winId());
         });
-#endif
     });
-
+#endif
     m_trayMenu->addMenu(fenceMenu);
-
     m_trayMenu->addSeparator();
 
-    // ---- 围栏数据备份/还原 ----
-    // 由于是二级菜单，通过添加前导和后置空格实现近似居中效果
-    QMenu *dataMenu = new QMenu("      数据管理      ", m_trayMenu);
-    
-    // 修复二级菜单的黑角问题
+    // ---- 数据管理子菜单 ----
+    QMenu *dataMenu = new QMenu("数据管理", m_trayMenu);
     dataMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
     dataMenu->setAttribute(Qt::WA_TranslucentBackground);
     dataMenu->setAttribute(Qt::WA_NoSystemBackground);
     dataMenu->setContentsMargins(1, 1, 1, 1);
-    
-    // 为二级菜单应用和主菜单一致的独立圆角风格
-    dataMenu->setStyleSheet(R"(
-        QMenu {
-            background-color: rgba(45, 45, 50, 240);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 8px;
-            font-family: "Microsoft YaHei", "Segoe UI";
-            font-size: 13px;
-        }
-        QMenu::item {
-            background: transparent;
-            color: #ffffff;
-            padding: 8px 16px;
-            border-radius: 6px;
-            margin: 2px 4px;
-        }
-        QMenu::item:selected {
-            background-color: rgba(255, 255, 255, 0.1);
-        }
-    )");
+    dataMenu->setStyleSheet(kSubMenuStyle);
+
+    QAction *backupAction  = dataMenu->addAction("备份围栏");
+    QAction *restoreAction = dataMenu->addAction("还原围栏");
+    connect(backupAction,  &QAction::triggered, this, [this]() {
+        QTimer::singleShot(10, this, [this]() { onBackupFencesRequested(); });
+    });
+    connect(restoreAction, &QAction::triggered, this, [this]() {
+        QTimer::singleShot(10, this, [this]() { onRestoreFencesRequested(); });
+    });
 
 #ifdef Q_OS_WIN
     connect(dataMenu, &QMenu::aboutToShow, this, [dataMenu]() {
         QTimer::singleShot(10, dataMenu, [dataMenu]() {
             if (!dataMenu) return;
             BlurHelper::enableRoundedCorners(dataMenu, 12);
-            HWND hMenu = (HWND)dataMenu->winId();
-            if (hMenu) {
-                SetForegroundWindow(hMenu);
-            }
+            SetForegroundWindow((HWND)dataMenu->winId());
         });
     });
 #endif
-    
-    // 为二级菜单项也添加空格保持居中对齐感
-    QAction *backupAction = dataMenu->addAction("  备份围栏  ");
-    connect(backupAction, &QAction::triggered, this, [this](){
-        QTimer::singleShot(10, this, [this]() {
-            onBackupFencesRequested();
-        });
-    });
-    
-    QAction *restoreAction = dataMenu->addAction("  还原围栏  ");
-    connect(restoreAction, &QAction::triggered, this, [this](){
-        QTimer::singleShot(10, this, [this]() {
-            onRestoreFencesRequested();
-        });
-    });
-    
     m_trayMenu->addMenu(dataMenu);
-
     m_trayMenu->addSeparator();
 
-    // 修复标准项颜色并尽量通过空格平衡视觉
-    QAction *autoStartAction = m_trayMenu->addAction("开机自启");
-    autoStartAction->setCheckable(true);
-    autoStartAction->setChecked(ConfigManager::instance()->autoStart());
-    connect(autoStartAction, &QAction::toggled, [](bool checked) {
-        ConfigManager::instance()->setAutoStart(checked);
-    });
+    // ---- 开机自启：三列布局确保文字永远处于菜单正中心 ----
+    QWidgetAction *autoStartWa = new QWidgetAction(m_trayMenu);
+    QWidget *autoStartWidget = new QWidget();
+    autoStartWidget->setObjectName("actionLabel");
+    autoStartWidget->setCursor(Qt::PointingHandCursor);
+    autoStartWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    autoStartWidget->installEventFilter(this);
+
+    QHBoxLayout *asLayout = new QHBoxLayout(autoStartWidget);
+    asLayout->setContentsMargins(0, 8, 0, 8);
+    asLayout->setSpacing(0);
+
+    QLabel *checkLbl = new QLabel();
+    checkLbl->setFixedWidth(20);
+    checkLbl->setAlignment(Qt::AlignCenter);
+    checkLbl->setStyleSheet("color: #4CAF50; font-size: 13px; background: transparent;");
+    checkLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    QLabel *autoTextLbl = new QLabel("开机自启");
+    autoTextLbl->setAlignment(Qt::AlignCenter);
+    autoTextLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    autoTextLbl->setStyleSheet("color: #ffffff; font-family: \"Microsoft YaHei\",\"Segoe UI\"; font-size: 13px; background: transparent;");
+    autoTextLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    QLabel *balanceLbl = new QLabel();
+    balanceLbl->setFixedWidth(20);
+    balanceLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    asLayout->addWidget(checkLbl);
+    asLayout->addWidget(autoTextLbl, 1);
+    asLayout->addWidget(balanceLbl);
+
+    auto updateAutoStartLabel = [checkLbl](bool checked) {
+        checkLbl->setText(checked ? "✔" : "");
+    };
+    updateAutoStartLabel(ConfigManager::instance()->autoStart());
+    connect(ConfigManager::instance(), &ConfigManager::autoStartChanged, this, updateAutoStartLabel);
+
+    autoStartWa->setDefaultWidget(autoStartWidget);
+    m_trayMenu->addAction(autoStartWa);
 
     m_trayMenu->addSeparator();
-
-    addCenteredAction("关于 DeskGo", [this]() { onAboutRequested(); });
-    addCenteredAction("退出应用", [this](){ onExitRequested(); });
+    addCenteredAction("关于 DeskGo");
+    addCenteredAction("退出应用");
 
     m_trayIcon->setContextMenu(m_trayMenu);
-    connect(m_trayIcon, &QSystemTrayIcon::activated, 
-            this, &FenceManager::onTrayIconActivated);
+    connect(m_trayIcon, &QSystemTrayIcon::activated, this, &FenceManager::onTrayIconActivated);
 
     m_trayIcon->show();
 
-    // 监听配置变化，实时更新所有围栏
     // 监听配置变化，实时更新所有围栏
     connect(ConfigManager::instance(), &ConfigManager::iconTextVisibleChanged, this, [this, toggleTextAction](bool visible) {
         for (FenceWindow *fence : m_fences) {
             if (fence) fence->setIconTextVisible(visible);
         }
-        
-        // 更新菜单项文字
-        if (toggleTextAction) {
-            toggleTextAction->setText(visible ? "  隐藏图标文字  " : "  显示图标文字  ");
-        }
+        if (toggleTextAction)
+            toggleTextAction->setText(visible ? "隐藏图标文字" : "显示图标文字");
     });
 }
 
 bool FenceManager::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched->objectName() == "menuItemLabel") {
+    if (watched->objectName() == "actionLabel") {
         if (event->type() == QEvent::MouseButtonRelease) {
-            QLabel *label = qobject_cast<QLabel*>(watched);
-            if (!label) return QObject::eventFilter(watched, event);
-            
-            QString text = label->text();
-            
-            // 先关闭菜单
             m_trayMenu->close();
-            
-            // 根据文本直接执行对应操作
-            if (text == "关于 DeskGo") {
-                QTimer::singleShot(10, this, [this]() {
-                    onAboutRequested();
-                });
-            } else if (text == "退出应用") {
-                QTimer::singleShot(10, this, [this]() {
-                    onExitRequested();
-                });
+
+            if (!qobject_cast<QLabel*>(watched)) {
+                ConfigManager::instance()->setAutoStart(!ConfigManager::instance()->autoStart());
+                return true;
             }
-            
+
+            QLabel *lbl = qobject_cast<QLabel*>(watched);
+            QString text = lbl->text();
+
+            if (text.contains("关于 DeskGo")) {
+                QTimer::singleShot(10, this, [this]() { onAboutRequested(); });
+            } else if (text.contains("退出应用")) {
+                QTimer::singleShot(10, this, [this]() { onExitRequested(); });
+            }
             return true;
         }
     }
@@ -451,7 +419,6 @@ void FenceManager::removeFence(FenceWindow *fence)
 
 void FenceManager::saveFences()
 {
-
     QJsonArray fencesArray;
     for (FenceWindow *fence : m_fences) {
         fencesArray.append(fence->toJson());
@@ -471,11 +438,6 @@ void FenceManager::loadFences()
         QJsonObject fenceObj = val.toObject();
         FenceWindow *fence = FenceWindow::fromJson(fenceObj);
         
-        // Debug output for geometry
-        qDebug() << "Loaded fence:" << fence->title() 
-                 << "Geometry:" << fence->geometry() 
-                 << "JSON:" << fenceObj["x"].toInt() << fenceObj["y"].toInt();
-
         // 预防坐标为 (0,0) 的情况（可能是保存失败或错误的初值）
         if (fence->x() == 0 && fence->y() == 0) {
             fence->move(getNewFencePosition());
@@ -498,10 +460,15 @@ void FenceManager::loadFences()
         
         // 连接首次显示完成信号
         connect(fence, &FenceWindow::firstShowCompleted, this, [fence]() {
-            qDebug() << "[FenceManager] First show completed for:" << fence->title();
         });
         
         m_fences.append(fence);
+    }
+
+    // [修复] 首次启动引导：如果没有载入任何围栏，自动创建一个空围栏
+    if (m_fences.isEmpty()) {
+        qDebug() << "[FenceManager] No fences detected. Creating initial fence for user guidance.";
+        createFence("我的围栏");
     }
 }
 
@@ -610,16 +577,17 @@ void FenceManager::onBackupFencesRequested()
 
     QString fencesJson   = appDataDir + "/fencing_config.json";
     QString fencesStorage = appDataDir + "/fences_storage";
+    QString userSettings = appDataDir + "/user_settings.ini";
 
-    // 构建 PowerShell 命令：把两个条目都打包进 zip
-    // Compress-Archive 支持多路径输入（数组）
+    // 构建 PowerShell 命令：把三个核心条目（配置、图标、样式）都打包进 zip
     QString psCmd = QString(
         "$items = @(); "
         "if (Test-Path '%1') { $items += '%1' }; "
         "if (Test-Path '%2') { $items += '%2' }; "
-        "if ($items.Count -gt 0) { Compress-Archive -Path $items -DestinationPath '%3' -Force } "
+        "if (Test-Path '%3') { $items += '%3' }; "
+        "if ($items.Count -gt 0) { Compress-Archive -Path $items -DestinationPath '%4' -Force } "
         "else { Write-Error 'No source files found' }"
-    ).arg(fencesJson, fencesStorage, savePath);
+    ).arg(fencesJson, fencesStorage, userSettings, savePath);
 
     QProcess proc;
     proc.setProgram("powershell.exe");
@@ -628,7 +596,7 @@ void FenceManager::onBackupFencesRequested()
     proc.waitForFinished(30000); // 最多等 30 秒
 
     if (proc.exitCode() == 0 && QFile::exists(savePath)) {
-        QMessageBox::information(nullptr, "备份成功", "围栏数据已成功备份。");
+        QMessageBox::information(nullptr, "备份成功", "围栏数据已成功备份");
     } else {
         QString errMsg = QString::fromUtf8(proc.readAllStandardError());
         QMessageBox::critical(nullptr, "备份失败",
@@ -740,4 +708,87 @@ void FenceManager::onRestoreFencesRequested()
 
     // 直接退出，不写任何数据到磁盘
     QApplication::quit();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 显示器配置变化处理（防抖触发）
+// ─────────────────────────────────────────────────────────────────────────────
+void FenceManager::onScreenConfigChanged()
+{
+    // 防抖：500ms 内多次调用只执行一次，避免切换动画期间反复触发
+    static QTimer *debounceTimer = nullptr;
+    if (!debounceTimer) {
+        debounceTimer = new QTimer(this);
+        debounceTimer->setSingleShot(true);
+        debounceTimer->setInterval(500);
+        connect(debounceTimer, &QTimer::timeout, this, &FenceManager::ensureFencesInScreen);
+    }
+    debounceTimer->start();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 确保所有围栏在屏幕可用区域内
+// 将超出边界的围栏移回最近的屏幕，保留至少 60px 的可见区域
+// ─────────────────────────────────────────────────────────────────────────────
+void FenceManager::ensureFencesInScreen()
+{
+    if (m_isShutdown) return;
+
+    const QList<QScreen*> screens = QApplication::screens();
+    if (screens.isEmpty()) return;
+
+    for (FenceWindow *fence : m_fences) {
+        if (!fence || !fence->isVisible()) continue;
+
+        QRect fenceRect = fence->geometry();
+        QPoint center   = fenceRect.center();
+
+        // 优先找包含围栏中心点的屏幕
+        QScreen *targetScreen = QApplication::screenAt(center);
+
+        // 如果中心点不在任何屏幕上（围栏已跑出边界），找最近的屏幕
+        if (!targetScreen) {
+            int minDist = INT_MAX;
+            for (QScreen *s : screens) {
+                QRect sa = s->availableGeometry();
+                int dx = qMax(0, qMax(sa.left() - center.x(), center.x() - sa.right()));
+                int dy = qMax(0, qMax(sa.top()  - center.y(), center.y() - sa.bottom()));
+                int dist = dx * dx + dy * dy;
+                if (dist < minDist) {
+                    minDist = dist;
+                    targetScreen = s;
+                }
+            }
+        }
+
+        if (!targetScreen) continue;
+
+        QRect  sa     = targetScreen->availableGeometry();
+        QPoint newPos = fenceRect.topLeft();
+        bool   moved  = false;
+
+        // 至少保留 60px 可见区域，防止围栏完全跑出屏幕导致无法拖回
+        const int vis = 60;
+
+        if (newPos.x() + fenceRect.width() < sa.left() + vis) {
+            newPos.setX(sa.left());
+            moved = true;
+        } else if (newPos.x() > sa.right() - vis) {
+            newPos.setX(sa.right() - fenceRect.width());
+            moved = true;
+        }
+
+        if (newPos.y() < sa.top()) {
+            newPos.setY(sa.top());
+            moved = true;
+        } else if (newPos.y() > sa.bottom() - vis) {
+            newPos.setY(sa.bottom() - vis);
+            moved = true;
+        }
+
+        if (moved) {
+            fence->move(newPos);
+            emit fence->geometryChanged(); // 触发位置保存
+        }
+    }
 }

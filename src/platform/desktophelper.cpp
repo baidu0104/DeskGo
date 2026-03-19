@@ -274,7 +274,7 @@ void DesktopHelper::setWindowToDesktop(QWidget *widget)
     
     HWND hWnd = (HWND)widget->winId();
     
-    qDebug() << "[setWindowToDesktop] Setting up desktop window";
+
     
     // 策略：使用 WS_POPUP 窗口，不设置父窗口
     // 通过 Z-order 放置在桌面图标层上方
@@ -326,7 +326,7 @@ void DesktopHelper::setWindowToDesktop(QWidget *widget)
         SetWindowLongPtr(hWnd, GWLP_HWNDPARENT, (LONG_PTR)hOwner);
     }
     */
-    qDebug() << "[setWindowToDesktop] Skipped Owner setting to avoid visibility issues.";
+
     
     // 3. 初始 Z-Order 设置
     SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, 
@@ -334,7 +334,7 @@ void DesktopHelper::setWindowToDesktop(QWidget *widget)
 
     ShowWindow(hWnd, SW_SHOWNOACTIVATE);
     
-    qDebug() << "[setWindowToDesktop] Setup complete (Owner Attempted).";
+
 #else
     Q_UNUSED(widget);
 #endif

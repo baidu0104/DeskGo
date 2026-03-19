@@ -6,7 +6,7 @@
          IgnorableNamespaces="uap rescap desktop">
   <Identity Name="1E2BEB94.DeskGo" 
             Publisher="CN=325F76E4-AE84-440F-8E86-4DCE7C8042AE" 
-            Version="1.5.5.0" 
+            Version="1.5.9.0" 
             ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>DeskGo (桌面整理专家)</DisplayName>
@@ -30,7 +30,7 @@
       </uap:VisualElements>
       <Extensions>
         <desktop:Extension Category="windows.startupTask" Executable="DeskGo.exe" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="DeskGoStartupTask" Enabled="false" DisplayName="DeskGo" />
+          <desktop:StartupTask TaskId="DeskGoStartupTask" Enabled="false" DisplayName="DeskGo (桌面整理专家)" />
         </desktop:Extension>
       </Extensions>
     </Application>

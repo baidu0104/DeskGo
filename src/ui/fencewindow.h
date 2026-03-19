@@ -63,6 +63,10 @@ public:
 
     // 设置图标文字显示
     void setIconTextVisible(bool visible);
+
+    // 背景颜色设置
+    QColor backgroundColor() const { return m_backgroundColor; }
+    void setBackgroundColor(const QColor &color);
     
     // 立即保存待处理的更改（停止定时器并触发保存）
     void flushPendingSave();
@@ -181,6 +185,9 @@ private:
     int m_dropIndicatorIndex = -1;
     QRect m_dropIndicatorRect;
     
+    // 视觉样式
+    QColor m_backgroundColor = QColor(30, 30, 35, 200);
+
     // 标题编辑
     // 状态保存
     QTimer *m_saveTimer;

@@ -41,6 +41,7 @@ private slots:
     void onExitRequested();
     void onBackupFencesRequested();
     void onRestoreFencesRequested();
+    void onScreenConfigChanged();   // 显示器配置变化（接入/断开/分辨率改变）
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -50,6 +51,7 @@ private:
     ~FenceManager();
 
     void setupTrayIcon();
+    void ensureFencesInScreen();    // 确保所有围栏在可用屏幕区域内
     QPoint getNewFencePosition() const;
 
     QList<FenceWindow*> m_fences;

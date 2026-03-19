@@ -25,11 +25,21 @@
 #include <QMessageBox>
 #include <QDebug>
 #include <QTimer>
+#include <QColorDialog>
 #include "../platform/desktophelper.h"
 
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <windowsx.h>
+#include <dwmapi.h>
+
+// DWM 属性定义，防止旧版 SDK 缺失
+#ifndef DWMWA_NCRENDERING_POLICY
+#define DWMWA_NCRENDERING_POLICY 2
+#endif
+#ifndef DWMNCRP_DISABLED
+#define DWMNCRP_DISABLED 1
+#endif
 
 // WM_MOUSEACTIVATE 返回值
 #ifndef MA_NOACTIVATE
@@ -88,7 +98,7 @@ LRESULT CALLBACK FenceWindow::KeyboardProc(int nCode, WPARAM wParam, LPARAM lPar
                         
                         EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
                             // 跳过自己管理的围栏窗口
-                            for (FenceWindow* fence : s_allFences) {
+                            for (FenceWindow* fence : qAsConst(s_allFences)) {
                                  if ((HWND)fence->winId() == hwnd) return TRUE;
                             }
                             
@@ -125,7 +135,7 @@ LRESULT CALLBACK FenceWindow::KeyboardProc(int nCode, WPARAM wParam, LPARAM lPar
                         // 退出显示桌面模式：仅恢复我们之前最小化的窗口
                         // 这解决了"恢复了莫名其妙的窗口"的问题
                         
-                        for (HWND hwnd : s_windowsToRestore) {
+                        for (HWND hwnd : qAsConst(s_windowsToRestore)) {
                             if (IsWindow(hwnd)) {
                                 // 仅恢复当前仍然是最小化状态的窗口
                                 // 如果用户在 ShowDesktop 模式下手动恢复了某个窗口，我们就不去动它
@@ -376,7 +386,7 @@ static QPixmap getWinIcon(const QString &path) {
             flags |= SHGFI_USEFILEATTRIBUTES;
         }
         
-        if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), fileAttr, &shfi, sizeof(shfi), flags)) {
+        if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), fileAttr, &shfi, sizeof(shfi), flags) && shfi.hIcon) {
             QPixmap pixmap = QtWin::fromHICON(shfi.hIcon);
             DestroyIcon(shfi.hIcon);
             if (!pixmap.isNull()) {
@@ -609,6 +619,15 @@ void FenceWindow::resizeEvent(QResizeEvent *event)
     }
 }
 
+void FenceWindow::setBackgroundColor(const QColor &color)
+{
+    if (m_backgroundColor != color) {
+        m_backgroundColor = color;
+        update(); // 触发重绘
+        if (m_saveTimer) m_saveTimer->start(); // 触发保存
+    }
+}
+
 QString FenceWindow::title() const
 {
     return m_title;
@@ -712,14 +731,10 @@ void FenceWindow::addIcon(IconWidget *icon)
 {
     if (!icon) return;
 
-    qDebug() << "[addIcon] Adding icon:" << icon->path();
-    qDebug() << "  m_collapsed:" << m_collapsed;
-    qDebug() << "  m_contentArea visible:" << m_contentArea->isVisible();
-    qDebug() << "  m_contentArea size:" << m_contentArea->size();
 
     // 检查是否已存在相同路径的图标 (路径比较不区分大小写且归一化)
     QString newPath = QDir::toNativeSeparators(QDir::cleanPath(icon->path()));
-    for (IconWidget *existingIcon : m_icons) {
+    for (IconWidget *existingIcon : qAsConst(m_icons)) {
         QString existingPath = QDir::toNativeSeparators(QDir::cleanPath(existingIcon->path()));
         if (QString::compare(existingPath, newPath, Qt::CaseInsensitive) == 0) {
             logToDesktop("  Icon already exists: " + newPath + ", deleting duplicate");
@@ -741,11 +756,6 @@ void FenceWindow::addIcon(IconWidget *icon)
     icon->setParent(m_contentArea);
     m_contentLayout->addWidget(icon);
     icon->show();
-    
-    qDebug() << "  icon visible:" << icon->isVisible();
-    qDebug() << "  icon size:" << icon->size();
-    qDebug() << "  icon pos:" << icon->pos();
-    qDebug() << "  layout count:" << m_contentLayout->count();
     
     // 强制更新布局
     m_contentLayout->invalidate();
@@ -798,7 +808,7 @@ void FenceWindow::removeIcon(IconWidget *icon)
                 QDir storageDir(fileInfo.absolutePath());
                 QStringList entries = storageDir.entryList(QDir::Files);
                 logToDesktop("[removeIcon] Found " + QString::number(entries.size()) + " files in directory");
-                for (const QString& entry : entries) {
+                for (const QString& entry : qAsConst(entries)) {
                     logToDesktop("[removeIcon] Checking: " + entry + " vs " + fileInfo.fileName());
                     if (QString::compare(entry, fileInfo.fileName(), Qt::CaseInsensitive) == 0) {
                         srcPath = storageDir.absoluteFilePath(entry);
@@ -898,7 +908,7 @@ void FenceWindow::removeIcon(IconWidget *icon)
 
 void FenceWindow::setIconTextVisible(bool visible)
 {
-    for (IconWidget *icon : m_icons) {
+    for (IconWidget *icon : qAsConst(m_icons)) {
         icon->setTextVisible(visible);
     }
 }
@@ -925,8 +935,8 @@ void FenceWindow::stopSaveTimer()
 void FenceWindow::restoreAllIcons()
 {
     // 创建一个临时副本，因为 removeIcon 会修改 list
-    auto iconsCopy = m_icons;
-    for (IconWidget *icon : iconsCopy) {
+    QList<IconWidget*> iconsCopy = m_icons;
+    for (IconWidget *icon : qAsConst(iconsCopy)) {
         removeIcon(icon);
     }
 }
@@ -949,11 +959,10 @@ QJsonObject FenceWindow::toJson() const
     obj["height"] = height();
     obj["collapsed"] = m_collapsed;
     obj["expandedHeight"] = m_expandedHeight;
-    // 不再保存 alwaysOnTop，因为我们已经通过键盘钩子解决了 Win+D 问题
-    // obj["alwaysOnTop"] = m_alwaysOnTop;
+    obj["backgroundColor"] = m_backgroundColor.name(QColor::HexArgb);
     
     QJsonArray iconsArray;
-    for (IconWidget *icon : m_icons) {
+    for (IconWidget *icon : qAsConst(m_icons)) {
         logToDesktop("[toJson]   Icon: " + icon->name() + " path: " + icon->path());
         
         QJsonObject iconObj;
@@ -998,6 +1007,10 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
     // 关键：创建窗口句柄但不显示
     // 这样可以让 setWindowToDesktop 工作，但窗口不会显示
     fence->winId(); // 强制创建窗口句柄
+    
+    if (json.contains("backgroundColor")) {
+        fence->setBackgroundColor(QColor(json["backgroundColor"].toString()));
+    }
     
     if (json["collapsed"].toBool()) {
         // 如果保存时是折叠的，那么 json["height"] 是 32。
@@ -1075,7 +1088,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
 
     QObject::connect(watcher, &QFutureWatcher<QList<IconWidget::IconData>>::finished, fence, [fence, watcher]() {
         QList<IconWidget::IconData> results = watcher->result();
-        for (const auto& data : results) {
+        for (const auto& data : qAsConst(results)) {
             IconWidget *icon = new IconWidget(data);
             if (data.icon.isNull()) {
                 icon->setData(data); // 内部仍有后备 fallback
@@ -1088,7 +1101,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
             fence->m_contentLayout->invalidate();
             fence->m_contentArea->updateGeometry();
             fence->m_contentArea->update();
-            for (IconWidget* icon : fence->m_icons) {
+            for (IconWidget* icon : qAsConst(fence->m_icons)) {
                 icon->update();
                 icon->show();
             }
@@ -1103,7 +1116,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
         QDir rootDir(storageRoot);
         QFileIconProvider iconProvider;
 
-        for (const auto& task : tasks) {
+        for (const auto& task : qAsConst(tasks)) {
             QString path = fromStoragePath(task.savedPath, fenceId);
             QFileInfo fileInfo(path);
             
@@ -1133,7 +1146,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                 
                 if (!fixed) {
                     QStringList subDirs = rootDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-                    for (const QString& subDir : subDirs) {
+                    for (const QString& subDir : qAsConst(subDirs)) {
                         QString searchPath = QDir::toNativeSeparators(QDir::cleanPath(storageRoot + "/" + subDir + "/" + fileName));
                         if (QFile::exists(searchPath)) {
                             path = searchPath;
@@ -1406,8 +1419,8 @@ void FenceWindow::paintEvent(QPaintEvent *event)
     QPainterPath path;
     path.addRoundedRect(rect(), 10, 10);
     
-    // 背景色 - 半透明深色背景
-    p.fillPath(path, QColor(30, 30, 35, 200));
+    // 绘制背景 (使用自定义颜色)
+    p.fillPath(path, m_backgroundColor);
     
     // 标题栏稍微深一点，与内容区进行视觉区分，减轻一点透明度让它不至于太黑
     p.setClipPath(path);
@@ -1460,7 +1473,7 @@ QPoint FenceWindow::snapPositionToOtherFences(const QPoint& targetPos, const QSi
     int myBottom = targetPos.y() + targetSize.height();
     
     // 遍历所有其他围栏的缓存
-    for (const QRect& otherRect : m_snapRectsCache) {
+    for (const QRect& otherRect : qAsConst(m_snapRectsCache)) {
         int otherLeft = otherRect.left();
         int otherRight = otherRect.right() + 1; // Qt的right()是width()-1
         int otherTop = otherRect.top();
@@ -1528,7 +1541,7 @@ QRect FenceWindow::snapGeometryToOtherFences(const QRect& targetGeo, int resizeE
     QRect snappedGeo = targetGeo;
     
     // 遍历所有其他围栏缓存
-    for (const QRect& otherRect : m_snapRectsCache) {
+    for (const QRect& otherRect : qAsConst(m_snapRectsCache)) {
         int otherLeft = otherRect.left();
         int otherRight = otherRect.right() + 1;
         int otherTop = otherRect.top();
@@ -1598,7 +1611,7 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
         // 记录拖曳/调整前的几何状态并刷新吸咐缓存
         m_resizeEdge = None;
         m_snapRectsCache.clear();
-        for (FenceWindow* other : s_allFences) {
+        for (FenceWindow* other : qAsConst(s_allFences)) {
             if (other != this) {
                 m_snapRectsCache.append(other->geometry());
             }
@@ -1655,11 +1668,32 @@ void FenceWindow::mouseMoveEvent(QMouseEvent *event)
         QPoint delta = event->globalPos() - m_dragStartGlobalPos;
         QPoint newPos = m_resizeStartGeo.topLeft() + delta; // 使用起始几何位置
         
-        // 应用围栏间边缘吸附
+        // 1. 应用围栏间边缘吸附
         QPoint snappedPos = snapPositionToOtherFences(newPos, size());
+        QRect candidateRect(snappedPos, size());
         
-        move(snappedPos);
-        // 注意：不更新 m_dragStartGlobalPos，保持相对于起始位置的计算
+        // 2. 强制性碰撞检查：禁止重叠
+        for (const QRect& other : qAsConst(m_snapRectsCache)) {
+            if (candidateRect.intersects(other)) {
+                // 根据起始位置判断碰撞面，将其推回边缘
+                if (m_resizeStartGeo.right() <= other.left()) {
+                    candidateRect.moveRight(other.left());
+                } else if (m_resizeStartGeo.left() >= other.right() + 1) {
+                    candidateRect.moveLeft(other.right() + 1);
+                }
+                
+                // 二次检查垂直撞击（处理对角线或已经水平对齐后的碰撞）
+                if (candidateRect.intersects(other)) {
+                    if (m_resizeStartGeo.bottom() <= other.top()) {
+                        candidateRect.moveBottom(other.top());
+                    } else if (m_resizeStartGeo.top() >= other.bottom() + 1) {
+                        candidateRect.moveTop(other.bottom() + 1);
+                    }
+                }
+            }
+        }
+        
+        move(candidateRect.topLeft());
         event->accept();
         return;
     }
@@ -1686,29 +1720,24 @@ void FenceWindow::mouseMoveEvent(QMouseEvent *event)
             if (newGeo.height() < minimumHeight()) newGeo.setBottom(m_resizeStartGeo.top() + minimumHeight());
         }
         
-        // 应用围栏间边缘吸附
+        // 1. 应用围栏间边缘吸附
         newGeo = snapGeometryToOtherFences(newGeo, m_resizeEdge);
         
-        // 确保吸附后仍满足最小尺寸约束
+        // 2. 强制性碰撞检查：禁止重叠
+        for (const QRect& other : qAsConst(m_snapRectsCache)) {
+            if (newGeo.intersects(other)) {
+                // 仅限制当前正在调整的边缘，使其不能穿过障碍物边框
+                if (m_resizeEdge & Left) newGeo.setLeft(qMax(newGeo.left(), other.right() + 1));
+                if (m_resizeEdge & Right) newGeo.setRight(qMin(newGeo.right(), other.left() - 1));
+                if (m_resizeEdge & Top) newGeo.setTop(qMax(newGeo.top(), other.bottom() + 1));
+                if (m_resizeEdge & Bottom) newGeo.setBottom(qMin(newGeo.bottom(), other.top() - 1));
+            }
+        }
+        
+        // 3. 确保吸附和碰撞处理后仍满足最小尺寸约束
         if (newGeo.width() < minimumWidth() || newGeo.height() < minimumHeight()) {
-            // 如果吸附导致尺寸过小，恢复到吸附前的几何
-            newGeo = m_resizeStartGeo;
-            if (m_resizeEdge & Left) {
-                newGeo.setLeft(m_resizeStartGeo.left() + delta.x());
-                if (newGeo.width() < minimumWidth()) newGeo.setLeft(m_resizeStartGeo.right() - minimumWidth());
-            }
-            if (m_resizeEdge & Right) {
-                newGeo.setRight(m_resizeStartGeo.right() + delta.x());
-                if (newGeo.width() < minimumWidth()) newGeo.setRight(m_resizeStartGeo.left() + minimumWidth());
-            }
-            if (m_resizeEdge & Top) {
-                newGeo.setTop(m_resizeStartGeo.top() + delta.y());
-                if (newGeo.height() < minimumHeight()) newGeo.setTop(m_resizeStartGeo.bottom() - minimumHeight());
-            }
-            if (m_resizeEdge & Bottom) {
-                newGeo.setBottom(m_resizeStartGeo.bottom() + delta.y());
-                if (newGeo.height() < minimumHeight()) newGeo.setBottom(m_resizeStartGeo.top() + minimumHeight());
-            }
+            // 如果处理导致尺寸过小，回退到逻辑计算的非吸附状态（这是为了防止因吸附死锁而无法反向调整）
+            // 但仍需由 setGeometry 的底层逻辑保证有效性
         }
         
         setGeometry(newGeo);
@@ -1927,87 +1956,166 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
     menu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
     menu->setAttribute(Qt::WA_DeleteOnClose);
     
-    // 使用半透明背景 (rgba)，Qt 会自动处理抗锯齿圆角
+#ifdef Q_OS_WIN
+    auto setupMenuBlur = [this](QMenu *m) {
+        connect(m, &QMenu::aboutToShow, this, [this, m]() {
+            // 在显示之前彻底移除系统阴影标志，防止黑边产生
+            HWND hMenu = (HWND)m->winId();
+            DWORD classStyle = GetClassLong(hMenu, GCL_STYLE);
+            if (classStyle & CS_DROPSHADOW) {
+                SetClassLong(hMenu, GCL_STYLE, classStyle & ~CS_DROPSHADOW);
+            }
+
+            QTimer::singleShot(20, this, [m]() {
+                if (!m || !m->isVisible()) return;
+                HWND hMenu = (HWND)m->winId();
+                if (!IsWindow(hMenu)) return;
+
+                // 1. 禁用 DWM 非客户区渲染 (阴影彻底消失)
+                int ncrender = 1; // DWMNCRP_DISABLED
+                DwmSetWindowAttribute(hMenu, 2, &ncrender, sizeof(ncrender));
+
+                // 2. 物理裁剪圆角 (与托盘菜单一致，使用 12px)
+                BlurHelper::enableRoundedCorners(m, 12); 
+
+                // 3. 调整 Z-Order 到围栏之上，桌面窗口之下
+                UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW;
+                // 强制菜单到最顶层（HWND_TOPMOST），确保不会被旁边任意层级的围栏窗口覆盖
+                SetWindowPos(hMenu, HWND_TOPMOST, 0, 0, 0, 0, flags);
+            });
+        });
+    };
+#endif
+
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    
+    // 极致紧凑排版 QSS（与托盘菜单样式保持一致）
     menu->setStyleSheet(R"(
         QMenu {
-            background-color: rgba(30, 30, 35, 200);
+            /* 统一使用托盘菜单的深灰色玻璃质感 */
+            background-color: rgba(45, 45, 50, 240);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 4px;
-            font-family: "Microsoft YaHei", "Segoe UI";
+            border-radius: 12px;
+            padding: 8px;
+            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
             font-size: 13px;
+            icon-size: 14px;
         }
         QMenu::item {
             background: transparent;
             color: #ffffff;
-            padding: 5px 16px;
-            min-height: 20px;
-            border-radius: 4px;
-            margin: 2px 4px;
+            /* 增加右侧内边距 (从 24px 到 36px)，为箭头预留更多呼吸空间 */
+            padding: 4px 36px 4px 4px; 
+            min-height: 22px;
+            /* 预留 1px 透明边框，防止悬浮时抖动 */
+            border: 1px solid transparent;
+            border-radius: 6px;
+            margin: 1px 4px;
         }
         QMenu::item:selected {
+            /* 统一托盘菜单的选择高亮色 */
             background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        /* 子菜单箭头定位 */
+        QMenu::right-arrow {
+            width: 12px;
+            height: 12px;
+            /* 向右侧边缘靠拢 (从 12px 移动到 8px)，增加与文字的间距感 */
+            right: 8px;
+        }
+        /* 对勾紧贴最左侧边缘，不占位 */
+        QMenu::indicator:checked {
+            position: absolute;
+            left: 1px;
+            width: 10px;
+            height: 10px;
+            image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzLjgiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTIwIDZMOSAxN0w0IDEyIiAvPjwvc3ZnPg==);
         }
         QMenu::separator {
             height: 1px;
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.15);
             margin: 4px 8px;
         }
     )");
 
     QAction *renameAction = menu->addAction("重命名");
     QAction *collapseAction = menu->addAction(m_collapsed ? "展开" : "折叠");
+    
+    // 外观样式
+    QMenu *appearanceMenu = menu->addMenu("外观样式");
+    appearanceMenu->setWindowFlags(menu->windowFlags());
+    appearanceMenu->setAttribute(Qt::WA_TranslucentBackground);
+    appearanceMenu->setStyleSheet(menu->styleSheet());
+    
+    QList<QPair<QString, QColor>> presets = {
+        {"经典深灰", QColor(30, 30, 35, 200)},
+        {"极地深蓝", QColor(26, 26, 46, 200)},
+        {"森林幽绿", QColor(26, 46, 26, 200)},
+        {"勃艮第红", QColor(46, 26, 26, 200)},
+        {"磨砂浅白", QColor(240, 240, 240, 40)}
+    };
+    
+    QActionGroup *group = new QActionGroup(appearanceMenu);
+    group->setExclusive(true);
+    
+    for (const auto &p : qAsConst(presets) ) {
+        // 使用十六进制字符串比较，判定精准
+        QString currentHex = m_backgroundColor.name(QColor::HexArgb);
+        QString presetHex = p.second.name(QColor::HexArgb);
+        bool isCurrent = (currentHex.compare(presetHex, Qt::CaseInsensitive) == 0);
+        
+        QIcon icon;
+        if (isCurrent) {
+            // 【选中态】：回归之前深受好评的“精致小圆点”
+            QPixmap pixmap(32, 32);
+            pixmap.fill(Qt::transparent);
+            QPainter painter(&pixmap);
+            painter.setRenderHint(QPainter::Antialiasing);
+            
+            // 恢复 16px 的精致尺寸
+            QRectF circleRect(8, 8, 16, 16); 
+            painter.setBrush(Qt::white);
+            painter.setPen(Qt::NoPen);
+            painter.drawEllipse(circleRect);
+            
+            icon = QIcon(pixmap.scaled(14, 14, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        }
+        
+        // 未选中项 icon 为空，即“不显示”，保持界面整洁
+        QAction *action = appearanceMenu->addAction(icon, p.first);
+        action->setCheckable(true);
+        action->setActionGroup(group);
+        if (isCurrent) {
+            action->setChecked(true);
+        }
+        
+        connect(action, &QAction::triggered, this, [this, p, p_first = p.first]() { 
+            qDebug() << "[Menu] Theme selected:" << p_first << p.second.name(QColor::HexArgb);
+            setBackgroundColor(p.second); 
+        });
+    }
+    
+    appearanceMenu->addSeparator();
+    QAction *customColorAction = appearanceMenu->addAction("更多颜色...");
+    connect(customColorAction, &QAction::triggered, this, [this]() {
+        QColor color = QColorDialog::getColor(m_backgroundColor, this, "选择围栏背景颜色", QColorDialog::ShowAlphaChannel);
+        if (color.isValid()) setBackgroundColor(color);
+    });
+
     menu->addSeparator();
     QAction *deleteAction = menu->addAction("删除围栏");
 
-    // 连接菜单动作
+    // 连接动作
     connect(renameAction, &QAction::triggered, this, &FenceWindow::startTitleEdit);
-    connect(collapseAction, &QAction::triggered, this, [this]() {
-        setCollapsed(!m_collapsed);
-    });
-    connect(deleteAction, &QAction::triggered, this, [this]() {
-        emit deleteRequested(this);
-    });
+    connect(collapseAction, &QAction::triggered, this, [this]() { setCollapsed(!m_collapsed); });
+    connect(deleteAction, &QAction::triggered, this, [this]() { emit deleteRequested(this); });
 
 #ifdef Q_OS_WIN
-    connect(menu, &QMenu::aboutToShow, this, [this, menu]() {
-        // 使用定时器延迟执行，确保在 Qt 完成窗口创建和显示之后再进行 Hack
-        // 这样可以覆盖 Qt 默认的 TopMost 设置
-        QTimer::singleShot(10, this, [this, menu]() {
-            if (!menu) return;
-            HWND hMenu = (HWND)menu->winId();
-            HWND hFence = (HWND)this->winId();
-            
-            // 0. 裁剪圆角 (解决黑点/毛刺问题)
-            BlurHelper::enableRoundedCorners(menu, 8); 
-            
-            // 1. 移除 WS_EX_TOPMOST 扩展样式，防止强制置顶
-
-            // 1. 移除 WS_EX_TOPMOST 扩展样式，防止强制置顶
-            LONG_PTR exStyle = GetWindowLongPtr(hMenu, GWL_EXSTYLE);
-            if (exStyle & WS_EX_TOPMOST) {
-                SetWindowLongPtr(hMenu, GWL_EXSTYLE, exStyle & ~WS_EX_TOPMOST);
-            }
-            
-            // 2. 调整 Z-order
-            // 获取围栏上面的那个窗口（hPrev）
-            // 如果我们将菜单插入到 hPrev 后面，菜单自然就在 围栏 上面，且在 hPrev 下面
-            HWND hPrev = GetWindow(hFence, GW_HWNDPREV);
-            
-            UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED;
-            
-            if (hPrev) {
-                SetWindowPos(hMenu, hPrev, 0, 0, 0, 0, flags);
-            } else {
-                // 如果围栏上面没有窗口（围栏就是当前层级的顶），则将菜单设为顶
-                // 注意：由于移除了 TOPMOST，这里的 HWND_TOP 只是非 TopMost 窗口的顶
-                SetWindowPos(hMenu, HWND_TOP, 0, 0, 0, 0, flags);
-            }
-        });
-    });
+    setupMenuBlur(menu);
+    setupMenuBlur(appearanceMenu);
 #endif
 
-    // 使用 exec 阻塞显示
     menu->exec(event->globalPos());
 }
 

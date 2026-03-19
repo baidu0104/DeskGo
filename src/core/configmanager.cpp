@@ -8,6 +8,117 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <winstring.h>
+
+static bool isMsixPackage() {
+    typedef LONG (WINAPI *GetCurrentPackageFullNamePtr)(UINT32*, PWSTR);
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    GetCurrentPackageFullNamePtr pGetCurrentPackageFullName = reinterpret_cast<GetCurrentPackageFullNamePtr>(reinterpret_cast<void(*)()>(GetProcAddress(hKernel32, "GetCurrentPackageFullName")));
+    if (pGetCurrentPackageFullName) {
+        UINT32 length = 0;
+        LONG rc = pGetCurrentPackageFullName(&length, NULL);
+        return rc != 15700L; // APPMODEL_ERROR_NO_PACKAGE
+    }
+    return false;
+}
+
+const IID IID_IAsyncInfo = { 0x00000036, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+const IID IID_IStartupTask = { 0xf75c23c8, 0xb5f2, 0x4f6c, { 0x88, 0xdd, 0x36, 0xcb, 0x1d, 0x59, 0x9d, 0x17 } };
+const IID IID_IStartupTaskStatics = { 0xee5b60bd, 0xa148, 0x41a7, { 0xb2, 0x6e, 0xe8, 0xb8, 0x8a, 0x1e, 0x62, 0xf8 } };
+
+struct IInspectable_Raw : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetIids(ULONG*, IID**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetRuntimeClassName(HSTRING*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetTrustLevel(int*) = 0;
+};
+struct IAsyncInfo_Raw : public IInspectable_Raw {
+    virtual HRESULT STDMETHODCALLTYPE get_Id(unsigned int* id) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Status(int* status) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ErrorCode(HRESULT* errorCode) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Cancel() = 0;
+    virtual HRESULT STDMETHODCALLTYPE Close() = 0;
+};
+struct IAsyncOperation_StartupTaskState_Raw : public IInspectable_Raw {
+    virtual HRESULT STDMETHODCALLTYPE put_Completed(void* handler) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Completed(void** handler) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetResults(int* results) = 0;
+};
+struct IStartupTask_Raw : public IInspectable_Raw {
+    virtual HRESULT STDMETHODCALLTYPE RequestEnableAsync(IAsyncOperation_StartupTaskState_Raw** operation) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Disable(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_State(int* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_TaskId(HSTRING* value) = 0;
+};
+struct IAsyncOperation_StartupTask_Raw : public IInspectable_Raw {
+    virtual HRESULT STDMETHODCALLTYPE put_Completed(void* handler) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Completed(void** handler) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetResults(IStartupTask_Raw** results) = 0;
+};
+struct IStartupTaskStatics_Raw : public IInspectable_Raw {
+    virtual HRESULT STDMETHODCALLTYPE GetForCurrentPackageAsync(void** operation) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetAsync(HSTRING taskId, IAsyncOperation_StartupTask_Raw** operation) = 0;
+};
+
+static bool WaitAsyncInfo(IUnknown* asyncOp) {
+    IAsyncInfo_Raw* info = nullptr;
+    HRESULT hr = asyncOp->QueryInterface(IID_IAsyncInfo, (void**)&info);
+    if (FAILED(hr) || !info) {
+        return false;
+    }
+    int status = 0;
+    for (int i = 0; i < 100; ++i) {
+        hr = info->get_Status(&status);
+        if (FAILED(hr)) break;
+        if (status != 0) break;
+        Sleep(50);
+    }
+    info->Release();
+    return status == 1; // Completed
+}
+
+static IStartupTask_Raw* GetMsixStartupTask(const QString& taskIdToFind) {
+    HMODULE hComBase = LoadLibraryW(L"combase.dll");
+    if (!hComBase) return nullptr;
+
+    typedef HRESULT (WINAPI *RoGetActivationFactoryFunc)(HSTRING, REFIID, void**);
+    typedef HRESULT (WINAPI *WindowsCreateStringFunc)(LPCWSTR, UINT32, HSTRING*);
+    typedef HRESULT (WINAPI *WindowsDeleteStringFunc)(HSTRING);
+    typedef HRESULT (WINAPI *RoInitializeFunc)(int);
+    
+    RoGetActivationFactoryFunc _RoGetActivationFactory = reinterpret_cast<RoGetActivationFactoryFunc>(reinterpret_cast<void(*)()>(GetProcAddress(hComBase, "RoGetActivationFactory")));
+    WindowsCreateStringFunc _WindowsCreateString = reinterpret_cast<WindowsCreateStringFunc>(reinterpret_cast<void(*)()>(GetProcAddress(hComBase, "WindowsCreateString")));
+    WindowsDeleteStringFunc _WindowsDeleteString = reinterpret_cast<WindowsDeleteStringFunc>(reinterpret_cast<void(*)()>(GetProcAddress(hComBase, "WindowsDeleteString")));
+    RoInitializeFunc _RoInitialize = reinterpret_cast<RoInitializeFunc>(reinterpret_cast<void(*)()>(GetProcAddress(hComBase, "RoInitialize")));
+
+    if (!_RoGetActivationFactory || !_WindowsCreateString || !_WindowsDeleteString) return nullptr;
+
+    if (_RoInitialize) _RoInitialize(1); // RO_INIT_MULTITHREADED = 1
+
+    HSTRING className = nullptr;
+    _WindowsCreateString(L"Windows.ApplicationModel.StartupTask", 36, &className);
+
+    IStartupTaskStatics_Raw* statics = nullptr;
+    HRESULT hr = _RoGetActivationFactory(className, IID_IStartupTaskStatics, (void**)&statics);
+    _WindowsDeleteString(className);
+
+    if (FAILED(hr) || !statics) return nullptr;
+
+    HSTRING hTaskId = nullptr;
+    _WindowsCreateString((LPCWSTR)taskIdToFind.utf16(), taskIdToFind.length(), &hTaskId);
+
+    IAsyncOperation_StartupTask_Raw* op = nullptr;
+    hr = statics->GetAsync(hTaskId, &op);
+    _WindowsDeleteString(hTaskId);
+    statics->Release();
+
+    if (FAILED(hr) || !op) return nullptr;
+
+    IStartupTask_Raw* task = nullptr;
+    if (WaitAsyncInfo(op)) op->GetResults(&task);
+    op->Release();
+    
+    return task;
+}
 #endif
 
 ConfigManager* ConfigManager::instance()
@@ -72,10 +183,10 @@ bool ConfigManager::autoStart() const
 void ConfigManager::setAutoStart(bool enabled)
 {
     if (m_autoStart != enabled) {
-        m_autoStart = enabled;
-        updateAutoStartRegistry(enabled);
+        bool finalState = updateAutoStartRegistry(enabled);
+        m_autoStart = finalState;
         requestSave();
-        emit autoStartChanged(enabled);
+        emit autoStartChanged(m_autoStart);
     }
 }
 
@@ -251,56 +362,37 @@ void ConfigManager::load()
 
     tryLoadJson(m_fencesPath);
 
-    // 启动时确保注册表状态与配置一致
-    updateAutoStartRegistry(m_autoStart);
+    // 启动时从系统读取真实的各种情况
+    syncAutoStartWithSystem();
 }
 
-void ConfigManager::updateAutoStartRegistry(bool enabled)
+bool ConfigManager::updateAutoStartRegistry(bool enabled)
 {
 #ifdef Q_OS_WIN
-    // 方案 1: 检查是否运行在 MSIX 容器中
-    // MSIX 应用无法直接修改注册表 Run 键，必须使用 StartupTask API
-    bool isPackaged = false;
-    
-    // 动态加载 GetPackageFamilyName 以兼容旧版编译器和 MinGW
-    typedef LONG (WINAPI *GetPackageFamilyNamePtr)(HANDLE, UINT32*, PWSTR);
-    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-    if (hKernel32) {
-        GetPackageFamilyNamePtr pGetPackageFamilyName = (GetPackageFamilyNamePtr)(void*)GetProcAddress(hKernel32, "GetPackageFamilyName");
-        if (pGetPackageFamilyName) {
-            UINT32 length = 0;
-            LONG rc = pGetPackageFamilyName(GetCurrentProcess(), &length, NULL);
-            // 如果返回 ERROR_INSUFFICIENT_BUFFER，说明应用处于包容器中
-            isPackaged = (rc == 122L); // 122 是 ERROR_INSUFFICIENT_BUFFER 的值
+    if (isMsixPackage()) {
+        static const QString kTaskId = "DeskGoStartupTask";
+        IStartupTask_Raw* task = GetMsixStartupTask(kTaskId);
+        if (!task) {
+            return enabled;
         }
-    }
 
-    if (isPackaged) {
-        // MSIX 容器环境：动态加载 Windows Runtime 库调用 StartupTask API
-        // 注意：这需要 link 对应的 WindowsApp.lib 或直接动态加载扩展
-        // 为了简化依赖，这里主要提供逻辑说明。在实际现代 C++/WinRT 环境中，代码如下：
-        /*
-        using namespace winrt::Windows::ApplicationModel;
-        auto task = StartupTask::GetAsync(L"DeskGoStartupTask").get();
-        if (enabled) task.RequestEnableAsync().get();
-        else task.Disable();
-        */
-        
-        // 鉴于本项目目前使用原生 Windows API 且可能未配置 WinRT 投影
-        // 我们通过 PowerShell 或外部辅助方式来实现，或者在 AppxManifest 中声明。
-        // 由于已经在 AppxManifest.xml 中添加了 StartupTask，
-        // 实际上在应用商店环境下，用户通过“任务管理器-启动”控制即可。
-        // 但为了实现代码控制，我们可以输出一个日志提醒，或者在支持的环境下调用 powershell。
-        
-        QString psCmd = QString("Get-AppxPackage *DeskGo* | Get-AppxPackageManifest | "
-                                "Select-Xml -XPath \"//desktop:StartupTask\" -Namespace @{desktop=\"http://schemas.microsoft.com/appx/manifest/desktop/windows10\"} | "
-                                "ForEach-Object { $_.Node.Enabled = \"%1\" }").arg(enabled ? "true" : "false");
-        // 注意：MSIX 内部权限受限，通常无法通过自写代码修改 Manifest，
-        // 需调用特定的 Windows 10 SDK 接口。
-        qDebug() << "[ConfigManager] App is running in MSIX container. Auto-start is managed via AppxManifest StartupTask.";
-        return;
+        if (enabled) {
+            IAsyncOperation_StartupTaskState_Raw* op = nullptr;
+            HRESULT hr = task->RequestEnableAsync(&op);
+            if (SUCCEEDED(hr) && op) {
+                if (WaitAsyncInfo(op)) {
+                    int finalState = 0;
+                    if (SUCCEEDED(op->GetResults(&finalState))) {
+                    }
+                }
+                op->Release();
+            }
+        } else {
+            task->Disable();
+        }
+        task->Release();
+        return enabled;
     }
-
     // 方案 2: 普通 Win32 环境（注册表方案）
     QString appName = "DeskGo";
     QString appPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
@@ -317,7 +409,43 @@ void ConfigManager::updateAutoStartRegistry(bool enabled)
         }
         RegCloseKey(hKey);
     }
+    return enabled;
 #else
     Q_UNUSED(enabled)
+    return enabled;
+#endif
+}
+
+void ConfigManager::syncAutoStartWithSystem()
+{
+#ifdef Q_OS_WIN
+    bool actualSystemState = false;
+
+    if (isMsixPackage()) {
+        static const QString kTaskId = "DeskGoStartupTask";
+        IStartupTask_Raw* task = GetMsixStartupTask(kTaskId);
+        if (task) {
+            int state = 0;
+            if (SUCCEEDED(task->get_State(&state))) {
+                // 2 = Enabled, 3 = EnabledByPolicy
+                actualSystemState = (state == 2 || state == 3);
+            }
+            task->Release();
+        }
+    } else {
+        QSettings registrySettings("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", QSettings::NativeFormat);
+        QString appName = "DeskGo";
+        actualSystemState = registrySettings.contains(appName);
+    }
+
+    if (m_autoStart != actualSystemState) {
+        m_autoStart = actualSystemState;
+        
+        if (m_settings) {
+            m_settings->setValue("General/AutoStart", m_autoStart);
+            m_settings->sync();
+        }
+        emit autoStartChanged(m_autoStart);
+    }
 #endif
 }

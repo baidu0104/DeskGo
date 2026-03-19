@@ -21,6 +21,8 @@ public:
     // 通用设置
     bool autoStart() const;
     void setAutoStart(bool enabled);
+    void syncAutoStartWithSystem();
+
 
     bool minimizeToTray() const;
     void setMinimizeToTray(bool enabled);
@@ -68,7 +70,7 @@ private:
     explicit ConfigManager(QObject *parent = nullptr);
     ~ConfigManager();
 
-    void updateAutoStartRegistry(bool enabled);
+    bool updateAutoStartRegistry(bool enabled);
 
     QSettings *m_settings;
     QTimer *m_saveDebounceTimer;
