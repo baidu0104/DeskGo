@@ -531,6 +531,11 @@ void FenceWindow::addIcon(IconWidget *icon)
     connect(icon, &IconWidget::removeRequested, [this, icon]() {
         removeIcon(icon);
     });
+    connect(icon, &IconWidget::launchPreferenceChanged, this, [this]() {
+        if (!m_restoringFromJson) {
+            emit geometryChanged();
+        }
+    });
 
     insertIconAt(icon, m_icons.size());
     
@@ -790,6 +795,9 @@ QJsonObject FenceWindow::toJson() const
                 iconObj["originalSourcePath"] = data.originalSourcePath;
             }
         }
+        if (data.alwaysRunAsAdmin) {
+            iconObj["alwaysRunAsAdmin"] = true;
+        }
         
         iconsArray.append(iconObj);
     }
@@ -876,6 +884,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
         QString savedPath;
         QString originalSourcePath;
         bool isFromDesktop = false;
+        bool alwaysRunAsAdmin = false;
         QPoint originalPos;
     };
     
@@ -891,6 +900,9 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
         }
         if (iconObj.contains("originalSourcePath")) {
             task.originalSourcePath = normalizePath(iconObj["originalSourcePath"].toString());
+        }
+        if (iconObj.contains("alwaysRunAsAdmin")) {
+            task.alwaysRunAsAdmin = iconObj["alwaysRunAsAdmin"].toBool();
         }
         tasks.append(task);
     }
@@ -1014,6 +1026,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                      data.originalPosition = task.originalPos;
                      data.originalSourcePath = task.originalSourcePath;
                  }
+                 data.alwaysRunAsAdmin = task.alwaysRunAsAdmin;
                  loadedDatas.append(data);
             } else {
                  logToDesktop("[parseTask]   FATAL: File not found even after fallback!");
@@ -1027,6 +1040,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                      data.originalPosition = task.originalPos;
                      data.originalSourcePath = task.originalSourcePath;
                  }
+                 data.alwaysRunAsAdmin = task.alwaysRunAsAdmin;
                  loadedDatas.append(data);
                  logToDesktop("[parseTask]   Preserved missing icon entry with fallback icon: " + data.path);
             }
@@ -2134,7 +2148,7 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
             left: 1px;
             width: 10px;
             height: 10px;
-            image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzLjgiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTIwIDZMOSAxN0w0IDEyIiAvPjwvc3ZnPg==);
+            image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCcgZmlsbD0nbm9uZScgc3Ryb2tlPScjMzJENzRCJyBzdHJva2Utd2lkdGg9JzMuOCcgc3Ryb2tlLWxpbmVjYXA9J3JvdW5kJyBzdHJva2UtbGluZWpvaW49J3JvdW5kJz48cGF0aCBkPSdNMjAgNkw5IDE3TDQgMTInLz48L3N2Zz4=);
         }
         QMenu::separator {
             height: 1px;

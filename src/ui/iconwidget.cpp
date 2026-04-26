@@ -9,6 +9,7 @@
 #include <QUrl>
 #include <QMenu>
 #include <QStyle>
+#include <QDir>
 #include <QDebug>
 #include <QTimer>
 #include <QToolTip>
@@ -148,6 +149,87 @@ QString IconWidget::path() const
     return m_data.path;
 }
 
+bool IconWidget::openPath(bool runAsAdmin)
+{
+    if (m_data.path.isEmpty()) {
+        return false;
+    }
+
+#ifdef Q_OS_WIN
+    if (runAsAdmin) {
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(SHELLEXECUTEINFOW);
+        sei.fMask = SEE_MASK_NOASYNC;
+        sei.hwnd = (HWND)window()->winId();
+        sei.lpVerb = L"runas";
+
+        const QString nativePath = QDir::toNativeSeparators(m_data.path);
+        const std::wstring wPath = nativePath.toStdWString();
+        sei.lpFile = wPath.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+
+        if (!ShellExecuteExW(&sei)) {
+            const DWORD error = GetLastError();
+            qWarning() << "[IconWidget] Failed to launch as admin:" << nativePath
+                       << "error:" << error;
+            return false;
+        }
+
+        resetParentWindowZOrder();
+        return true;
+    }
+#endif
+
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(m_data.path))) {
+        qWarning() << "[IconWidget] Failed to open path:" << m_data.path;
+        return false;
+    }
+
+    resetParentWindowZOrder();
+    return true;
+}
+
+void IconWidget::resetParentWindowZOrder()
+{
+#ifdef Q_OS_WIN
+    QWidget *parentWidget = window();
+    if (!parentWidget) {
+        return;
+    }
+
+    QTimer::singleShot(10, parentWidget, [parentWidget]() {
+        HWND hWnd = (HWND)parentWidget->winId();
+
+        HWND hProgman = FindWindow(L"Progman", NULL);
+        HWND hDefView = FindWindowEx(hProgman, NULL, L"SHELLDLL_DefView", NULL);
+
+        if (!hDefView) {
+            HWND hWorkerW = NULL;
+            while ((hWorkerW = FindWindowEx(NULL, hWorkerW, L"WorkerW", NULL)) != NULL) {
+                hDefView = FindWindowEx(hWorkerW, NULL, L"SHELLDLL_DefView", NULL);
+                if (hDefView) {
+                    break;
+                }
+            }
+        }
+
+        HWND hListView = NULL;
+        if (hDefView) {
+            hListView = FindWindowEx(hDefView, NULL, L"SysListView32", NULL);
+        }
+
+        if (hListView) {
+            SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(hWnd, hListView, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+            qDebug() << "[IconWidget] Z-order reset after opening file";
+        }
+    });
+#endif
+}
+
 void IconWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event)
@@ -233,50 +315,9 @@ void IconWidget::mouseReleaseEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton && m_pressed) {
         // 如果是点击操作（不是拖拽），且在控件范围内
         if (rect().contains(event->pos())) {
-            // 打开文件/快捷方式
-            if (!m_data.path.isEmpty()) {
-                QDesktopServices::openUrl(QUrl::fromLocalFile(m_data.path));
-                
-                // 打开文件后，立即重置父窗口的 Z-order
-#ifdef Q_OS_WIN
-                QWidget *parentWidget = window();
-                if (parentWidget) {
-                    QTimer::singleShot(10, parentWidget, [parentWidget]() {
-                        HWND hWnd = (HWND)parentWidget->winId();
-                        
-                        // 找到桌面图标层
-                        HWND hProgman = FindWindow(L"Progman", NULL);
-                        HWND hDefView = FindWindowEx(hProgman, NULL, L"SHELLDLL_DefView", NULL);
-                        
-                        if (!hDefView) {
-                            HWND hWorkerW = NULL;
-                            while ((hWorkerW = FindWindowEx(NULL, hWorkerW, L"WorkerW", NULL)) != NULL) {
-                                 hDefView = FindWindowEx(hWorkerW, NULL, L"SHELLDLL_DefView", NULL);
-                                 if (hDefView) break;
-                            }
-                        }
-                        
-                        HWND hListView = NULL;
-                        if (hDefView) {
-                            hListView = FindWindowEx(hDefView, NULL, L"SysListView32", NULL);
-                        }
-                        
-                        if (hListView) {
-                            // 先降到最底层
-                            SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, 
-                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                            
-                            // 然后提升到桌面图标上方
-                            SetWindowPos(hWnd, hListView, 0, 0, 0, 0, 
-                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                            
-                            qDebug() << "[IconWidget] Z-order reset after opening file";
-                        }
-                    });
-                }
-#endif
+            if (openPath(m_data.alwaysRunAsAdmin)) {
+                emit doubleClicked(); // 仍然发出这个信号以防外部使用，或者可以改名为 clicked
             }
-            emit doubleClicked(); // 仍然发出这个信号以防外部使用，或者可以改名为 clicked
         }
     }
     m_pressed = false;
@@ -317,26 +358,56 @@ void IconWidget::contextMenuEvent(QContextMenuEvent *event)
     menu.setContentsMargins(1, 1, 1, 1);
     
     menu.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+
+    const QPixmap checkedPixmap = []() {
+        QPixmap pixmap(16, 16);
+        pixmap.fill(Qt::transparent);
+
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor("#4CAF50"), 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawLine(QPointF(3.0, 8.5), QPointF(6.5, 12.0));
+        painter.drawLine(QPointF(6.5, 12.0), QPointF(13.0, 4.0));
+        return pixmap;
+    }();
+    const QPixmap emptyPixmap = []() {
+        QPixmap pixmap(16, 16);
+        pixmap.fill(Qt::transparent);
+        return pixmap;
+    }();
     
     menu.setStyleSheet(R"(
         QMenu {
             background-color: rgba(45, 45, 50, 240);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 4px;
-            font-family: "Microsoft YaHei", "Segoe UI";
+            border-radius: 12px;
+            padding: 8px;
+            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
             font-size: 13px;
+            icon-size: 14px;
         }
         QMenu::item {
             background: transparent;
             color: #ffffff;
-            padding: 5px 16px;
-            min-height: 20px;
-            border-radius: 4px;
-            margin: 2px 4px;
+            padding: 4px 36px 4px 4px;
+            min-height: 22px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            margin: 1px 4px;
         }
         QMenu::item:selected {
             background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        QMenu::right-arrow {
+            width: 12px;
+            height: 12px;
+            right: 8px;
+        }
+        QMenu::separator {
+            height: 1px;
+            background: rgba(255, 255, 255, 0.15);
+            margin: 4px 8px;
         }
     )");
 
@@ -371,11 +442,31 @@ void IconWidget::contextMenuEvent(QContextMenuEvent *event)
     });
 #endif
 
+    QAction *alwaysRunAsAdminAction = menu.addAction("总是以管理员身份运行");
+    alwaysRunAsAdminAction->setIcon(QIcon(m_data.alwaysRunAsAdmin ? checkedPixmap : emptyPixmap));
+    alwaysRunAsAdminAction->setIconVisibleInMenu(true);
+
+    QAction *runAsAdminAction = menu.addAction("以管理员身份运行");
+    runAsAdminAction->setIcon(QIcon(emptyPixmap));
+    runAsAdminAction->setIconVisibleInMenu(true);
+    menu.addSeparator();
     QAction *deleteAction = menu.addAction("删除");
+    deleteAction->setIcon(QIcon(emptyPixmap));
+    deleteAction->setIconVisibleInMenu(true);
     QAction *propertiesAction = menu.addAction("属性");
+    propertiesAction->setIcon(QIcon(emptyPixmap));
+    propertiesAction->setIconVisibleInMenu(true);
     QAction *selected = menu.exec(event->globalPos());
 
-    if (selected == deleteAction) {
+    if (selected == alwaysRunAsAdminAction) {
+        const bool newValue = !m_data.alwaysRunAsAdmin;
+        if (m_data.alwaysRunAsAdmin != newValue) {
+            m_data.alwaysRunAsAdmin = newValue;
+            emit launchPreferenceChanged();
+        }
+    } else if (selected == runAsAdminAction) {
+        openPath(true);
+    } else if (selected == deleteAction) {
         emit removeRequested();
     } else if (selected == propertiesAction) {
 #ifdef Q_OS_WIN

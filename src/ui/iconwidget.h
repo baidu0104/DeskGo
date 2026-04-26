@@ -22,6 +22,7 @@ public:
         QPixmap icon;        // 图标
         QPoint originalPosition = QPoint(-1, -1); // 原始桌面坐标
         bool isFromDesktop = false; // 是否来自桌面
+        bool alwaysRunAsAdmin = false; // 是否默认以管理员身份启动
     };
 
     explicit IconWidget(const IconData &data, QWidget *parent = nullptr);
@@ -40,6 +41,7 @@ signals:
     void doubleClicked();
     void dragStarted();
     void removeRequested();
+    void launchPreferenceChanged();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -53,6 +55,8 @@ protected:
 
 private:
     void setupUi();
+    bool openPath(bool runAsAdmin);
+    void resetParentWindowZOrder();
 
     QLabel *m_iconLabel;
     QLabel *m_nameLabel;
