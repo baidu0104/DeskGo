@@ -2,7 +2,10 @@
 #include "iconwidget.h"
 #include "flowlayout.h"
 #include "../platform/blurhelper.h"
-#include "../core/configmanager.h"
+#include "src/core/fencemanager.h"
+#include "src/core/configmanager.h"
+#include "src/core/iconhelper.h"
+#include "stylehelper.h"
 
 #include <QPainter>
 #include <QPainterPath>
@@ -31,7 +34,11 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <windowsx.h>
+#include <objbase.h>
+#include <shlobj.h>
+#include <commoncontrols.h>
 #include <dwmapi.h>
+#include <QtWin>
 
 // DWM 属性定义，防止旧版 SDK 缺失
 #ifndef DWMWA_NCRENDERING_POLICY
@@ -47,26 +54,32 @@
 #endif
 #endif
 
-#include <QtWin>
-#include <shlobj.h>
-#include <commoncontrols.h>
 
-// 确保定义 SHIL_JUMBO，以防编译环境缺失
-#ifndef SHIL_JUMBO
-#define SHIL_JUMBO 0x4
-#endif
-#ifndef SHIL_EXTRALARGE
-#define SHIL_EXTRALARGE 0x2
-#endif
-
-// 定义 IImageList 接口 ID
-// UUID: 46EB5926-582E-4017-9FDF-E8998DAA0950
-static const GUID IID_IImageList_LOCAL = { 0x46EB5926, 0x582E, 0x4017, { 0x9F, 0xDF, 0xE8, 0x99, 0x8D, 0xAA, 0x09, 0x50 } };
 
 // 日志记录函数
 void logToDesktop(const QString &msg) {
-    Q_UNUSED(msg)
-    // 调试功能已关闭，不再输出文件
+    ConfigManager::writeLog(msg);
+}
+
+namespace {
+QString normalizePath(const QString &path)
+{
+    return QDir::toNativeSeparators(QDir::cleanPath(path));
+}
+
+QString displayNameForFile(const QFileInfo &fileInfo)
+{
+    QString name = fileInfo.completeBaseName();
+    if (fileInfo.fileName().endsWith(".lnk", Qt::CaseInsensitive) ||
+        fileInfo.fileName().endsWith(".url", Qt::CaseInsensitive)) {
+        name = fileInfo.fileName();
+        if (name.endsWith(".lnk", Qt::CaseInsensitive) ||
+            name.endsWith(".url", Qt::CaseInsensitive)) {
+            name.chop(4);
+        }
+    }
+    return name;
+}
 }
 
 // 静态成员初始化
@@ -196,225 +209,7 @@ LRESULT CALLBACK FenceWindow::MouseProc(int nCode, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(s_hMouseHook, nCode, wParam, lParam);
 }
 
-// 辅助函数：裁剪透明边框
-// 用于处理那些画布很大但实际内容很小的图标 (如某些 256x256 图标实际只有 32x32 的内容)
-static QPixmap cropTransparent(const QPixmap& pixmap) {
-    if (pixmap.isNull()) return pixmap;
-    
-    QImage img = pixmap.toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
-    int w = img.width();
-    int h = img.height();
-    
-    // 如果图片已经很小，就不需要处理了
-    if (w <= 48 && h <= 48) return pixmap;
 
-    int top = -1, bottom = -1, left = -1, right = -1;
-
-    // 扫描上边界
-    for (int y = 0; y < h; ++y) {
-        const QRgb *scanLine = (const QRgb *)img.constScanLine(y);
-        for (int x = 0; x < w; ++x) {
-            if (qAlpha(scanLine[x]) > 10) { // 阈值 > 10 忽略极淡的杂色
-                top = y;
-                break;
-            }
-        }
-        if (top != -1) break;
-    }
-
-    if (top == -1) return pixmap; // 全透明
-
-    // 扫描下边界
-    for (int y = h - 1; y >= top; --y) {
-        const QRgb *scanLine = (const QRgb *)img.constScanLine(y);
-        for (int x = 0; x < w; ++x) {
-            if (qAlpha(scanLine[x]) > 10) {
-                bottom = y;
-                break;
-            }
-        }
-        if (bottom != -1) break;
-    }
-
-    // 扫描左边界
-    for (int x = 0; x < w; ++x) {
-        for (int y = top; y <= bottom; ++y) {
-             if (qAlpha(img.pixel(x, y)) > 10) {
-                 left = x;
-                 break;
-             }
-        }
-        if (left != -1) break;
-    }
-
-    // 扫描右边界
-    for (int x = w - 1; x >= left; --x) {
-        for (int y = top; y <= bottom; ++y) {
-             if (qAlpha(img.pixel(x, y)) > 10) {
-                 right = x;
-                 break;
-             }
-        }
-        if (right != -1) break;
-    }
-    
-    QRect validRect(left, top, right - left + 1, bottom - top + 1);
-    
-    // 只有当有效区域显著小于原图时才裁剪 (例如有效面积 < 原图的 40% 或者 边长 < 60%)
-    // 对于 256x256 的图，如果内容只有 128x128 (50% 边长)，裁剪是有意义的
-    if (validRect.width() < w * 0.7 && validRect.height() < h * 0.7) {
-        // 稍微留一点边距 (10%)
-        int padding = qMax(validRect.width(), validRect.height()) * 0.1;
-        validRect.adjust(-padding, -padding, padding, padding);
-        
-        // 确保不越界
-        validRect = validRect.intersected(img.rect());
-        
-        // 只有当裁剪后的尺寸仍然有意义时才返回
-        if (validRect.isValid() && validRect.width() > 0 && validRect.height() > 0) {
-             return QPixmap::fromImage(img.copy(validRect));
-        }
-    }
-
-    return pixmap;
-}
-
-// 辅助函数：将绝对路径转换为相对存储路径
-static QString toStoragePath(const QString& path, const QString& fenceId) {
-    if (path.isEmpty()) return path;
-    
-    // 归一化输入路径：确保使用原生分隔符且清理多余引用
-    QString normalizedPath = QDir::toNativeSeparators(QDir::cleanPath(path));
-    
-    // 获取基准存储目录
-    QString storageBase = QDir::toNativeSeparators(QDir::cleanPath(
-        ConfigManager::instance()->fencesStoragePath() + "/" + fenceId));
-    
-    // 增加分隔符防止 GUID 匹配异常
-    QString storageBaseWithSep = storageBase;
-    if (!storageBaseWithSep.endsWith(QDir::separator())) {
-        storageBaseWithSep += QDir::separator();
-    }
-
-    if (normalizedPath.startsWith(storageBaseWithSep, Qt::CaseInsensitive)) {
-        QDir baseDir(storageBase);
-        QString relative = baseDir.relativeFilePath(normalizedPath);
-        // 清理 "." 或 "./"
-        if (relative.startsWith("./") || relative.startsWith(".\\")) relative = relative.mid(2);
-        
-        if (!relative.contains("..") && relative != ".") {
-            return "storage:" + relative;
-        }
-    }
-    return normalizedPath;
-}
-
-// 辅助函数：将相对存储路径转换为绝对路径
-static QString fromStoragePath(const QString& path, const QString& fenceId) {
-    if (path.isEmpty()) return path;
-
-    if (path.startsWith("storage:")) {
-        QString relative = path.mid(8);
-        // 移除多余的斜杠前缀
-        while (relative.startsWith("/") || relative.startsWith("\\")) relative = relative.mid(1);
-        
-        QString storageBase = QDir::toNativeSeparators(QDir::cleanPath(
-            ConfigManager::instance()->fencesStoragePath() + "/" + fenceId));
-            
-        return QDir::toNativeSeparators(QDir::cleanPath(storageBase + QDir::separator() + relative));
-    }
-    return QDir::toNativeSeparators(QDir::cleanPath(path));
-}
-
-// 获取系统原生图标辅助函数
-static QPixmap getWinIcon(const QString &path) {
-    // 使用 CoInitializeEx 避免与已存在的 COM 初始化冲突
-    // COINIT_APARTMENTTHREADED 适用于 UI 线程
-    HRESULT hrCom = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    bool comInitializedByUs = SUCCEEDED(hrCom); // RPC_E_CHANGED_MODE 也当做未初始化
-
-    QString nativePath = QDir::toNativeSeparators(path);
-    QPixmap result;
-
-    SHFILEINFO shfi;
-    memset(&shfi, 0, sizeof(shfi));
-
-    // 特殊处理：对于 .url 文件（网络快捷方式），使用 FILE_ATTRIBUTE_NORMAL 标志
-    DWORD fileAttr = 0;
-    if (path.endsWith(".url", Qt::CaseInsensitive)) {
-        fileAttr = FILE_ATTRIBUTE_NORMAL;
-    }
-
-    // 尝试1: 使用 SHGetImageList 获取超大图标 (Jumbo/ExtraLarge)
-    UINT flags = SHGFI_SYSICONINDEX;
-    if (fileAttr != 0) {
-        flags |= SHGFI_USEFILEATTRIBUTES;
-    }
-    
-    if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), fileAttr, &shfi, sizeof(shfi), flags)) {
-
-        IImageList *imageList = nullptr;
-        HRESULT hr = E_FAIL;
-
-        hr = SHGetImageList(SHIL_JUMBO, IID_IImageList_LOCAL, (void**)&imageList);
-
-        if (FAILED(hr)) {
-            hr = SHGetImageList(SHIL_EXTRALARGE, IID_IImageList_LOCAL, (void**)&imageList);
-        }
-
-        if (SUCCEEDED(hr) && imageList) {
-            HICON hIcon = nullptr;
-            hr = imageList->GetIcon(shfi.iIcon, ILD_TRANSPARENT, &hIcon);
-
-            if (SUCCEEDED(hr) && hIcon) {
-                QPixmap pixmap = QtWin::fromHICON(hIcon);
-                DestroyIcon(hIcon);
-
-                if (!pixmap.isNull()) {
-                    result = cropTransparent(pixmap);
-                }
-            }
-            imageList->Release();
-        }
-    }
-
-    // 尝试2: 如果上面失败了，回退到标准的 SHGetFileInfo (32x32)
-    if (result.isNull()) {
-        memset(&shfi, 0, sizeof(shfi));
-        flags = SHGFI_ICON | SHGFI_LARGEICON;
-        if (fileAttr != 0) {
-            flags |= SHGFI_USEFILEATTRIBUTES;
-        }
-        
-        if (SHGetFileInfo((const wchar_t*)nativePath.utf16(), fileAttr, &shfi, sizeof(shfi), flags) && shfi.hIcon) {
-            QPixmap pixmap = QtWin::fromHICON(shfi.hIcon);
-            DestroyIcon(shfi.hIcon);
-            if (!pixmap.isNull()) {
-                result = pixmap;
-            }
-        }
-    }
-
-    // 尝试3: 通过 ExtractIconEx (针对 exe/dll)
-    if (result.isNull() && (path.endsWith(".exe", Qt::CaseInsensitive) || path.endsWith(".dll", Qt::CaseInsensitive))) {
-        HICON hIconLarge = NULL;
-        UINT extracted = ExtractIconEx((const wchar_t*)nativePath.utf16(), 0, &hIconLarge, NULL, 1);
-        if (extracted > 0 && hIconLarge) {
-            QPixmap pixmap = QtWin::fromHICON(hIconLarge);
-            DestroyIcon(hIconLarge);
-            if (!pixmap.isNull()) {
-                 result = pixmap;
-            }
-        }
-    }
-
-    // 只有我们初始化了 COM，才反初始化；避免对外部已有的 COM 导致影响
-    if (comInitializedByUs) {
-        CoUninitialize();
-    }
-
-    return result;
-}
 
 FenceWindow::FenceWindow(const QString &title, QWidget *parent)
     : QWidget(parent)
@@ -508,15 +303,7 @@ void FenceWindow::setupUi()
     m_titleLabel = new QLabel(m_title, this);
     m_titleLabel->setFixedHeight(32);
     m_titleLabel->setAlignment(Qt::AlignCenter);
-    m_titleLabel->setStyleSheet(R"(
-        QLabel {
-            color: #ffffff;
-            font-size: 12px;
-            font-weight: 500;
-            background: transparent;
-            padding: 0 10px;
-        }
-    )");
+    m_titleLabel->setStyleSheet(StyleHelper::fenceTitleStyle());
     m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     mainLayout->addWidget(m_titleLabel);
 
@@ -534,21 +321,18 @@ void FenceWindow::setupUi()
 
     // 初始化空状态引导文字
     m_placeholderLabel = new QLabel(m_contentArea);
-    m_placeholderLabel->setText("整理桌面，从这里开启");
+    m_placeholderLabel->setText(tr("Organize your desktop, start here"));
     m_placeholderLabel->setAlignment(Qt::AlignCenter);
-    m_placeholderLabel->setStyleSheet(R"(
-        QLabel {
-            color: rgba(255, 255, 255, 0.7);
-            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-            font-size: 15px;
-            font-weight: 400;
-            letter-spacing: 2px;
-            background: transparent;
-        }
-    )");
+    m_placeholderLabel->setStyleSheet(StyleHelper::placeholderStyle());
     m_placeholderLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     
     updatePlaceholder();
+
+    m_bottomAlignmentGuide = new QWidget(this);
+    m_bottomAlignmentGuide->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_bottomAlignmentGuide->setStyleSheet("background-color: rgba(100, 150, 255, 220); border-radius: 1px;");
+    m_bottomAlignmentGuide->setGeometry(8, height() - 3, qMax(24, width() - 16), 3);
+    m_bottomAlignmentGuide->hide();
 }
 
 void FenceWindow::setupBlurEffect()
@@ -614,7 +398,7 @@ void FenceWindow::resizeEvent(QResizeEvent *event)
     }
 
     // 触发保存（使用防抖动延迟）
-    if (m_saveTimer) {
+    if (!m_restoringFromJson && m_saveTimer) {
         m_saveTimer->start();
     }
 }
@@ -624,7 +408,7 @@ void FenceWindow::setBackgroundColor(const QColor &color)
     if (m_backgroundColor != color) {
         m_backgroundColor = color;
         update(); // 触发重绘
-        if (m_saveTimer) m_saveTimer->start(); // 触发保存
+        if (!m_restoringFromJson && m_saveTimer) m_saveTimer->start(); // 触发保存
     }
 }
 
@@ -748,25 +532,46 @@ void FenceWindow::addIcon(IconWidget *icon)
         removeIcon(icon);
     });
 
-    m_icons.append(icon);
-    
-    // 应用当前的文字显示设置
-    icon->setTextVisible(ConfigManager::instance()->iconTextVisible());
-    
-    icon->setParent(m_contentArea);
-    m_contentLayout->addWidget(icon);
-    icon->show();
-    
-    // 强制更新布局
-    m_contentLayout->invalidate();
-    m_contentLayout->update();
-    m_contentArea->update();
-    update();
+    insertIconAt(icon, m_icons.size());
     
     logToDesktop("  Icon successfully added to layout. Count: " + QString::number(m_icons.size()));
     
     updatePlaceholder();
-    emit geometryChanged(); // 保存更改
+    if (!m_restoringFromJson) {
+        emit geometryChanged(); // 保存更改
+    }
+}
+
+void FenceWindow::insertIconAt(IconWidget *icon, int index)
+{
+    if (!icon) return;
+
+    const int boundedIndex = qBound(0, index, m_icons.size());
+    m_icons.insert(boundedIndex, icon);
+
+    icon->setTextVisible(ConfigManager::instance()->iconTextVisible());
+    icon->setParent(m_contentArea);
+
+    if (FlowLayout *flowLayout = dynamic_cast<FlowLayout*>(m_contentLayout)) {
+        flowLayout->insertItem(boundedIndex, new QWidgetItem(icon));
+    } else {
+        m_contentLayout->addWidget(icon);
+    }
+
+    icon->show();
+
+    m_contentLayout->invalidate();
+    m_contentLayout->update();
+    m_contentArea->updateGeometry();
+    m_contentArea->update();
+    update();
+}
+
+void FenceWindow::clearDropIndicator()
+{
+    m_showDropIndicator = false;
+    m_dropIndicatorIndex = -1;
+    m_dropIndicatorRect = QRect();
 }
 
 void FenceWindow::removeIcon(IconWidget *icon)
@@ -776,10 +581,12 @@ void FenceWindow::removeIcon(IconWidget *icon)
 
         // 如果是来自桌面的图标，尝试恢复回去
         if (icon->data().isFromDesktop) {
-            QString srcPath = QDir::toNativeSeparators(QDir::cleanPath(icon->path()));
+            QString srcPath = normalizePath(icon->path());
             QString desktopPath = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
             QFileInfo fileInfo(srcPath);
-            QString targetPath = QDir::toNativeSeparators(QDir::cleanPath(desktopPath + "/" + fileInfo.fileName()));
+            QString targetPath = icon->data().originalSourcePath.isEmpty()
+                ? normalizePath(desktopPath + "/" + fileInfo.fileName())
+                : normalizePath(icon->data().originalSourcePath);
             
             logToDesktop("[removeIcon] srcPath: " + srcPath);
             logToDesktop("[removeIcon] targetPath: " + targetPath);
@@ -902,6 +709,10 @@ void FenceWindow::removeIcon(IconWidget *icon)
         
         updatePlaceholder();
         emit geometryChanged();
+        FenceManager::instance()->saveFences();
+        if (!ConfigManager::instance()->sync()) {
+            logToDesktop("[removeIcon] Immediate sync failed after removing icon.");
+        }
     }
 }
 
@@ -968,13 +779,16 @@ QJsonObject FenceWindow::toJson() const
         QJsonObject iconObj;
         iconObj["name"] = icon->name();
         // 如果路径在当前围栏的存储目录中，则保存为相对路径，避免移动目录后失效
-        iconObj["path"] = toStoragePath(icon->path(), m_id);
+        iconObj["path"] = IconHelper::toStoragePath(icon->path(), m_id);
         
         IconWidget::IconData data = icon->data();
         if (data.isFromDesktop) {
             iconObj["isFromDesktop"] = true;
             iconObj["originalX"] = data.originalPosition.x();
             iconObj["originalY"] = data.originalPosition.y();
+            if (!data.originalSourcePath.isEmpty()) {
+                iconObj["originalSourcePath"] = data.originalSourcePath;
+            }
         }
         
         iconsArray.append(iconObj);
@@ -986,7 +800,11 @@ QJsonObject FenceWindow::toJson() const
 
 FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
 {
-    FenceWindow *fence = new FenceWindow(json["title"].toString("新围栏"));
+    FenceWindow *fence = new FenceWindow(json["title"].toString(tr("New Fence")));
+    fence->m_restoringFromJson = true;
+    if (fence->m_saveTimer) {
+        fence->m_saveTimer->stop();
+    }
     
     QString id = json["id"].toString();
     if (id.isEmpty()) id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1056,6 +874,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
     struct IconTask {
         QString name;
         QString savedPath;
+        QString originalSourcePath;
         bool isFromDesktop = false;
         QPoint originalPos;
     };
@@ -1070,6 +889,9 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
             task.isFromDesktop = true;
             task.originalPos = QPoint(iconObj["originalX"].toInt(), iconObj["originalY"].toInt());
         }
+        if (iconObj.contains("originalSourcePath")) {
+            task.originalSourcePath = normalizePath(iconObj["originalSourcePath"].toString());
+        }
         tasks.append(task);
     }
     
@@ -1079,6 +901,10 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
     if (!fence->m_collapsed) fence->m_contentArea->raise();
     
     if (tasks.isEmpty()) {
+        if (fence->m_saveTimer) {
+            fence->m_saveTimer->stop();
+        }
+        fence->m_restoringFromJson = false;
         return fence;
     }
 
@@ -1107,20 +933,29 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
             }
         }
         logToDesktop("[fromJson] All async icons restored for: " + fence->title());
+        if (fence->m_saveTimer) {
+            fence->m_saveTimer->stop();
+        }
+        fence->m_restoringFromJson = false;
         watcher->deleteLater();
     });
 
     QString fenceId = fence->id();
     auto parseTask = [fenceId, storageBase, storageRoot, tasks]() -> QList<IconWidget::IconData> {
+        // [关键] 在后台线程初始化 COM 环境，否则 SHGetImageList 等 Shell API 可能会在某些环境下失效或挂起
+        HRESULT hr_com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        logToDesktop(QString("[parseTask] Worker thread started for %1. COM init: %2").arg(fenceId).arg(hr_com == S_OK ? "OK" : "Already Init/Error"));
         QList<IconWidget::IconData> loadedDatas;
         QDir rootDir(storageRoot);
         QFileIconProvider iconProvider;
 
         for (const auto& task : qAsConst(tasks)) {
-            QString path = fromStoragePath(task.savedPath, fenceId);
+            QString path = IconHelper::fromStoragePath(task.savedPath, fenceId);
             QFileInfo fileInfo(path);
-            
+
             bool exists = fileInfo.exists();
+            logToDesktop("[parseTask] Processing: " + task.name + " (" + path + ") exists:" + QString::number(exists));
+
             if (!exists) {
 #ifdef Q_OS_WIN
                 std::wstring wPath = path.toStdWString();
@@ -1129,6 +964,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                     exists = true;
                     fileInfo.setFile(path);
                     fileInfo.refresh();
+                    logToDesktop("[parseTask]   Windows API detected file exists: " + path);
                 }
 #endif
             }
@@ -1139,9 +975,11 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
 
                 bool fixed = false;
                 QString autoPath = QDir::toNativeSeparators(QDir::cleanPath(storageBase + "/" + fileName));
+                logToDesktop("[parseTask]   Attempt fallback check: " + autoPath);
                 if (QFile::exists(autoPath)) {
                     path = autoPath;
                     fixed = true;
+                    logToDesktop("[parseTask]   Fallback SUCCESS: fixed path to " + path);
                 }
                 
                 if (!fixed) {
@@ -1151,6 +989,7 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                         if (QFile::exists(searchPath)) {
                             path = searchPath;
                             fixed = true;
+                            logToDesktop("[parseTask]   Global Search SUCCESS: found in " + path);
                             break;
                         }
                     }
@@ -1164,7 +1003,8 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                  data.path = QDir::toNativeSeparators(QDir::cleanPath(path));
                  data.targetPath = data.path;
                  
-                 data.icon = getWinIcon(data.path);
+                 data.icon = IconHelper::getWinIcon(data.path);
+                 logToDesktop("[parseTask]   Icon extraction: " + QString(data.icon.isNull() ? "FAILED" : "OK"));
                  if (data.icon.isNull()) {
                      data.icon = iconProvider.icon(fileInfo).pixmap(48, 48);
                  }
@@ -1172,10 +1012,27 @@ FenceWindow* FenceWindow::fromJson(const QJsonObject &json)
                  if (task.isFromDesktop) {
                      data.isFromDesktop = true;
                      data.originalPosition = task.originalPos;
+                     data.originalSourcePath = task.originalSourcePath;
                  }
                  loadedDatas.append(data);
+            } else {
+                 logToDesktop("[parseTask]   FATAL: File not found even after fallback!");
+                 IconWidget::IconData data;
+                 data.name = task.name;
+                 data.path = QDir::toNativeSeparators(QDir::cleanPath(path));
+                 data.targetPath = data.path;
+                 data.icon = iconProvider.icon(QFileIconProvider::File).pixmap(48, 48);
+                 if (task.isFromDesktop) {
+                     data.isFromDesktop = true;
+                     data.originalPosition = task.originalPos;
+                     data.originalSourcePath = task.originalSourcePath;
+                 }
+                 loadedDatas.append(data);
+                 logToDesktop("[parseTask]   Preserved missing icon entry with fallback icon: " + data.path);
             }
         }
+        logToDesktop(QString("[parseTask] Worker thread finished for %1. Loaded %2 icons").arg(fenceId).arg(loadedDatas.size()));
+        CoUninitialize();
         return loadedDatas;
     };
 
@@ -1277,6 +1134,12 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
     }
 
     if (msg->message == WM_NCHITTEST) {
+        if (ConfigManager::instance()->layoutLocked()) {
+            m_nativeHitResizeEdge = None;
+            *result = HTCLIENT;
+            return true;
+        }
+
         // 如果窗口被折叠，只允许通过标题栏拖拽，不允许调整大小
         // 如果窗口被折叠，允许调整左右大小
         if (m_collapsed) {
@@ -1288,16 +1151,19 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
              const int border = 8;
              
              if (x < border) {
+                 m_nativeHitResizeEdge = Left;
                  *result = HTLEFT;
                  return true;
              }
              if (x >= w - border) {
+                 m_nativeHitResizeEdge = Right;
                  *result = HTRIGHT;
                  return true;
              }
              
              // 其他区域返回 HTCLIENT，让 Qt 处理拖动
              // 不使用 HTCAPTION 以避免与 Qt 的拖动逻辑冲突
+             m_nativeHitResizeEdge = None;
              *result = HTCLIENT;
              return true;
         }
@@ -1319,34 +1185,42 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
         bool bottom = y >= h - border;
         
         if (top && left) {
+            m_nativeHitResizeEdge = Top | Left;
             *result = HTTOPLEFT;
             return true;
         }
         if (top && right) {
+            m_nativeHitResizeEdge = Top | Right;
             *result = HTTOPRIGHT;
             return true;
         }
         if (bottom && left) {
+            m_nativeHitResizeEdge = Bottom | Left;
             *result = HTBOTTOMLEFT;
             return true;
         }
         if (bottom && right) {
+            m_nativeHitResizeEdge = Bottom | Right;
             *result = HTBOTTOMRIGHT;
             return true;
         }
         if (left) {
+            m_nativeHitResizeEdge = Left;
             *result = HTLEFT;
             return true;
         }
         if (right) {
+            m_nativeHitResizeEdge = Right;
             *result = HTRIGHT;
             return true;
         }
         if (top) {
+            m_nativeHitResizeEdge = Top;
             *result = HTTOP;
             return true;
         }
         if (bottom) {
+            m_nativeHitResizeEdge = Bottom;
             *result = HTBOTTOM;
             return true;
         }
@@ -1354,18 +1228,92 @@ bool FenceWindow::nativeEvent(const QByteArray &eventType, void *message, long *
         // 标题栏检测 (用于移动)
         // 返回 HTCLIENT 让 Qt 处理拖动，不使用 HTCAPTION 以避免与 Qt 的拖动逻辑冲突
         if (titleBarRect().contains(lp)) {
+            m_nativeHitResizeEdge = None;
             *result = HTCLIENT;
             return true;
         }
         
         // 其他区域明确返回 HTCLIENT，确保子控件接收鼠标事件
+        m_nativeHitResizeEdge = None;
         *result = HTCLIENT;
         return true;
     }
+
+    if (msg->message == WM_ENTERSIZEMOVE) {
+        m_alignmentGuideDebugState.clear();
+        if (m_nativeHitResizeEdge != None) {
+            m_isResizing = true;
+            m_resizeEdge = m_nativeHitResizeEdge;
+            m_resizeStartGeo = geometry();
+            m_snapRectsCache.clear();
+            for (FenceWindow *other : qAsConst(s_allFences)) {
+                if (other != this) {
+                    m_snapRectsCache.append(other->geometry());
+                }
+            }
+
+            qDebug() << "[AlignmentGuide] native-enter" << m_id
+                     << "edge=" << m_resizeEdge
+                     << "cache=" << m_snapRectsCache.size()
+                     << "geo=" << geometry();
+            logToDesktop(QString("[AlignmentGuide] native-enter %1 edge=%2 cache=%3 geo=(%4,%5,%6,%7)")
+                             .arg(m_id)
+                             .arg(m_resizeEdge)
+                             .arg(m_snapRectsCache.size())
+                             .arg(x())
+                             .arg(y())
+                             .arg(width())
+                             .arg(height()));
+        }
+    }
+
+    if (msg->message == WM_SIZING && m_isResizing && m_resizeEdge != None) {
+        RECT *rect = reinterpret_cast<RECT*>(msg->lParam);
+        if (rect) {
+            QRect targetGeo(rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top);
+            QRect snappedGeo = snapGeometryToOtherFences(targetGeo, m_resizeEdge);
+
+            rect->left = snappedGeo.left();
+            rect->top = snappedGeo.top();
+            rect->right = snappedGeo.left() + snappedGeo.width();
+            rect->bottom = snappedGeo.top() + snappedGeo.height();
+
+            if (m_resizeEdge & Bottom) {
+                updateBottomAlignmentGuide(snappedGeo);
+            } else {
+                clearBottomAlignmentGuides();
+            }
+
+            const QString state = QString("native-sizing edge=%1 targetBottom=%2 snappedBottom=%3")
+                                      .arg(m_resizeEdge)
+                                      .arg(targetGeo.bottom() + 1)
+                                      .arg(snappedGeo.bottom() + 1);
+            if (m_alignmentGuideDebugState != state) {
+                m_alignmentGuideDebugState = state;
+                qDebug() << "[AlignmentGuide]" << m_id << state;
+                logToDesktop(QString("[AlignmentGuide] %1 %2").arg(m_id, state));
+            }
+        }
+    }
+
     // 另外，当调整大小时，我们需要通知 Qt 更新布局，
     // 因为通过 WM_NCHITTEST 调整大小绕过了 Qt 的 resizeEvent 吗？不，Qt 会收到 WM_SIZE。
     // 但是我们需要在大小改变后保存位置。
     if (msg->message == WM_EXITSIZEMOVE) {
+        if (m_isResizing) {
+            clearBottomAlignmentGuides();
+            qDebug() << "[AlignmentGuide] native-exit" << m_id << "geo=" << geometry();
+            logToDesktop(QString("[AlignmentGuide] native-exit %1 geo=(%2,%3,%4,%5)")
+                             .arg(m_id)
+                             .arg(x())
+                             .arg(y())
+                             .arg(width())
+                             .arg(height()));
+        }
+        m_isResizing = false;
+        m_resizeEdge = None;
+        m_nativeHitResizeEdge = None;
+        m_alignmentGuideDebugState.clear();
         emit geometryChanged();
     }
     
@@ -1452,11 +1400,125 @@ void FenceWindow::paintEvent(QPaintEvent *event)
         p.setBrush(Qt::NoBrush);
         p.drawRoundedRect(indicatorRect, 2, 2);
     }
+
 }
 
 QRect FenceWindow::titleBarRect() const
 {
     return QRect(0, 0, width(), 32);
+}
+
+void FenceWindow::updateBottomAlignmentGuide(const QRect &targetGeo)
+{
+    if (!(m_resizeEdge & Bottom) || m_snapRectsCache.isEmpty() || !m_bottomAlignmentGuide) {
+        const QString state = QString("skip edge=%1 cache=%2 guide=%3")
+                                  .arg(m_resizeEdge)
+                                  .arg(m_snapRectsCache.size())
+                                  .arg(m_bottomAlignmentGuide ? "yes" : "no");
+        if (m_alignmentGuideDebugState != state) {
+            m_alignmentGuideDebugState = state;
+            qDebug() << "[AlignmentGuide]" << m_id << state;
+            logToDesktop(QString("[AlignmentGuide] %1 %2").arg(m_id, state));
+        }
+        clearBottomAlignmentGuides();
+        return;
+    }
+
+    const int targetBottom = targetGeo.bottom() + 1;
+    int closestBottom = -1;
+    int minDistance = SNAP_THRESHOLD + 1;
+
+    for (const QRect &otherRect : qAsConst(m_snapRectsCache)) {
+        const int otherBottom = otherRect.bottom() + 1;
+        const int distance = qAbs(targetBottom - otherBottom);
+        if (distance <= SNAP_THRESHOLD && distance < minDistance) {
+            minDistance = distance;
+            closestBottom = otherBottom;
+        }
+    }
+
+    if (closestBottom < 0) {
+        const QString state = QString("miss targetBottom=%1 cache=%2")
+                                  .arg(targetBottom)
+                                  .arg(m_snapRectsCache.size());
+        if (m_alignmentGuideDebugState != state) {
+            m_alignmentGuideDebugState = state;
+            qDebug() << "[AlignmentGuide]" << m_id << state;
+            logToDesktop(QString("[AlignmentGuide] %1 %2").arg(m_id, state));
+        }
+        clearBottomAlignmentGuides();
+        return;
+    }
+
+    const QString state = QString("hit targetBottom=%1 closestBottom=%2 cache=%3")
+                              .arg(targetBottom)
+                              .arg(closestBottom)
+                              .arg(m_snapRectsCache.size());
+    if (m_alignmentGuideDebugState != state) {
+        m_alignmentGuideDebugState = state;
+        qDebug() << "[AlignmentGuide]" << m_id << state;
+        logToDesktop(QString("[AlignmentGuide] %1 %2").arg(m_id, state));
+    }
+
+    clearBottomAlignmentGuides();
+
+    for (FenceWindow *fence : qAsConst(s_allFences)) {
+        if (!fence || !fence->isVisible()) {
+            continue;
+        }
+
+        if (fence == this) {
+            const int currentLocalY = qMin(targetGeo.height() - 3, qMax(2, closestBottom - targetGeo.top() - 1));
+            fence->showBottomAlignmentGuideAt(currentLocalY);
+            continue;
+        }
+
+        const int fenceBottom = fence->geometry().bottom() + 1;
+        if (qAbs(fenceBottom - closestBottom) <= 1) {
+            fence->showBottomAlignmentGuideAt(qMax(2, fence->height() - 3));
+        }
+    }
+}
+
+void FenceWindow::showBottomAlignmentGuideAt(int localY)
+{
+    if (!m_bottomAlignmentGuide) {
+        return;
+    }
+
+    const int guideY = qBound(2, localY, qMax(2, height() - 3));
+    m_bottomAlignmentGuide->setGeometry(8, guideY, qMax(24, width() - 16), 3);
+    m_bottomAlignmentGuide->raise();
+    m_bottomAlignmentGuide->show();
+    qDebug() << "[AlignmentGuide] show" << m_id << "localY=" << guideY
+             << "geo=" << m_bottomAlignmentGuide->geometry();
+    logToDesktop(QString("[AlignmentGuide] show %1 localY=%2 geo=(%3,%4,%5,%6)")
+                     .arg(m_id)
+                     .arg(guideY)
+                     .arg(m_bottomAlignmentGuide->x())
+                     .arg(m_bottomAlignmentGuide->y())
+                     .arg(m_bottomAlignmentGuide->width())
+                     .arg(m_bottomAlignmentGuide->height()));
+}
+
+void FenceWindow::clearBottomAlignmentGuide()
+{
+    if (!m_bottomAlignmentGuide || !m_bottomAlignmentGuide->isVisible()) {
+        return;
+    }
+
+    m_bottomAlignmentGuide->hide();
+    qDebug() << "[AlignmentGuide] hide" << m_id;
+    logToDesktop(QString("[AlignmentGuide] hide %1").arg(m_id));
+}
+
+void FenceWindow::clearBottomAlignmentGuides()
+{
+    for (FenceWindow *fence : qAsConst(s_allFences)) {
+        if (fence) {
+            fence->clearBottomAlignmentGuide();
+        }
+    }
 }
 
 // 边缘吸附：拖动时计算吸附后的位置
@@ -1602,6 +1664,16 @@ QRect FenceWindow::snapGeometryToOtherFences(const QRect& targetGeo, int resizeE
 
 void FenceWindow::mousePressEvent(QMouseEvent *event)
 {
+    if (ConfigManager::instance()->layoutLocked()) {
+        m_isDragging = false;
+        m_isResizing = false;
+        m_resizeEdge = None;
+        m_nativeHitResizeEdge = None;
+        clearBottomAlignmentGuide();
+        event->ignore();
+        return;
+    }
+
     if (event->button() == Qt::LeftButton) {
         m_dragStartPos = event->pos();
         m_dragStartGlobalPos = event->globalPos();
@@ -1611,6 +1683,7 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
         // 记录拖曳/调整前的几何状态并刷新吸咐缓存
         m_resizeEdge = None;
         m_snapRectsCache.clear();
+        clearBottomAlignmentGuide();
         for (FenceWindow* other : qAsConst(s_allFences)) {
             if (other != this) {
                 m_snapRectsCache.append(other->geometry());
@@ -1636,6 +1709,20 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
 
         if (m_resizeEdge != None) {
             m_isResizing = true;
+            m_alignmentGuideDebugState.clear();
+            qDebug() << "[AlignmentGuide] press" << m_id
+                     << "edge=" << m_resizeEdge
+                     << "cache=" << m_snapRectsCache.size()
+                     << "geo=" << geometry();
+            const QRect currentGeo = geometry();
+            logToDesktop(QString("[AlignmentGuide] press %1 edge=%2 cache=%3 geo=(%4,%5,%6,%7)")
+                             .arg(m_id)
+                             .arg(m_resizeEdge)
+                             .arg(m_snapRectsCache.size())
+                             .arg(currentGeo.x())
+                             .arg(currentGeo.y())
+                             .arg(currentGeo.width())
+                             .arg(currentGeo.height()));
             
             // 设置全局光标，防止拖拽过程中光标丢失
             Qt::CursorShape shape = Qt::ArrowCursor;
@@ -1663,8 +1750,15 @@ void FenceWindow::mousePressEvent(QMouseEvent *event)
 
 void FenceWindow::mouseMoveEvent(QMouseEvent *event)
 {
+    if (ConfigManager::instance()->layoutLocked()) {
+        setCursor(Qt::ArrowCursor);
+        event->ignore();
+        return;
+    }
+
     // 如果正在拖拽
     if (m_isDragging && (event->buttons() & Qt::LeftButton)) {
+        clearBottomAlignmentGuide();
         QPoint delta = event->globalPos() - m_dragStartGlobalPos;
         QPoint newPos = m_resizeStartGeo.topLeft() + delta; // 使用起始几何位置
         
@@ -1739,7 +1833,8 @@ void FenceWindow::mouseMoveEvent(QMouseEvent *event)
             // 如果处理导致尺寸过小，回退到逻辑计算的非吸附状态（这是为了防止因吸附死锁而无法反向调整）
             // 但仍需由 setGeometry 的底层逻辑保证有效性
         }
-        
+
+        updateBottomAlignmentGuide(newGeo);
         setGeometry(newGeo);
         event->accept();
         return;
@@ -1823,6 +1918,15 @@ void FenceWindow::mouseReleaseEvent(QMouseEvent *event)
         
         m_isDragging = false;
         m_isResizing = false;
+        clearBottomAlignmentGuide();
+        m_alignmentGuideDebugState.clear();
+        qDebug() << "[AlignmentGuide] release" << m_id << "geo=" << geometry();
+        logToDesktop(QString("[AlignmentGuide] release %1 geo=(%2,%3,%4,%5)")
+                         .arg(m_id)
+                         .arg(x())
+                         .arg(y())
+                         .arg(width())
+                         .arg(height()));
         
         // 仅拖动时保存位置，调整大小时 geometryChanged 信号会在 resizeEvent 中触发吗？不一定，手动 setGeometry 会触发
         // 为了保险，统一在释放时触发一次保存
@@ -1848,7 +1952,7 @@ void FenceWindow::moveEvent(QMoveEvent *event)
 {
     QWidget::moveEvent(event);
     // 移动时重置定时器，停止移动1秒后触发保存
-    if (m_saveTimer) m_saveTimer->start();
+    if (!m_restoringFromJson && m_saveTimer) m_saveTimer->start();
 }
 
 
@@ -2039,21 +2143,21 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
         }
     )");
 
-    QAction *renameAction = menu->addAction("重命名");
-    QAction *collapseAction = menu->addAction(m_collapsed ? "展开" : "折叠");
+    QAction *renameAction = menu->addAction(tr("Rename"));
+    QAction *collapseAction = menu->addAction(m_collapsed ? tr("Expand") : tr("Collapse"));
     
     // 外观样式
-    QMenu *appearanceMenu = menu->addMenu("外观样式");
+    QMenu *appearanceMenu = menu->addMenu(tr("Appearance"));
     appearanceMenu->setWindowFlags(menu->windowFlags());
     appearanceMenu->setAttribute(Qt::WA_TranslucentBackground);
     appearanceMenu->setStyleSheet(menu->styleSheet());
     
     QList<QPair<QString, QColor>> presets = {
-        {"经典深灰", QColor(30, 30, 35, 200)},
-        {"极地深蓝", QColor(26, 26, 46, 200)},
-        {"森林幽绿", QColor(26, 46, 26, 200)},
-        {"勃艮第红", QColor(46, 26, 26, 200)},
-        {"磨砂浅白", QColor(240, 240, 240, 40)}
+        {tr("Classic Dark"), QColor(30, 30, 35, 200)},
+        {tr("Polar Blue"),   QColor(26, 26, 46, 200)},
+        {tr("Forest Green"), QColor(26, 46, 26, 200)},
+        {tr("Burgundy Red"), QColor(46, 26, 26, 200)},
+        {tr("Frosted White"),QColor(240, 240, 240, 40)}
     };
     
     QActionGroup *group = new QActionGroup(appearanceMenu);
@@ -2097,14 +2201,22 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
     }
     
     appearanceMenu->addSeparator();
-    QAction *customColorAction = appearanceMenu->addAction("更多颜色...");
+    QAction *customColorAction = appearanceMenu->addAction(tr("More Colors..."));
     connect(customColorAction, &QAction::triggered, this, [this]() {
-        QColor color = QColorDialog::getColor(m_backgroundColor, this, "选择围栏背景颜色", QColorDialog::ShowAlphaChannel);
+        QColor color = QColorDialog::getColor(m_backgroundColor, this, tr("Pick Fence Background Color"), QColorDialog::ShowAlphaChannel);
         if (color.isValid()) setBackgroundColor(color);
     });
 
     menu->addSeparator();
-    QAction *deleteAction = menu->addAction("删除围栏");
+    QAction *deleteAction = menu->addAction(tr("Delete Fence"));
+    const bool locked = ConfigManager::instance()->layoutLocked();
+    renameAction->setEnabled(!locked);
+    collapseAction->setEnabled(!locked);
+    deleteAction->setEnabled(!locked);
+    customColorAction->setEnabled(!locked);
+    for (QAction *action : appearanceMenu->actions()) {
+        action->setEnabled(!locked);
+    }
 
     // 连接动作
     connect(renameAction, &QAction::triggered, this, &FenceWindow::startTitleEdit);
@@ -2127,6 +2239,11 @@ void FenceWindow::contextMenuEvent(QContextMenuEvent *event)
 
 void FenceWindow::dragEnterEvent(QDragEnterEvent *event)
 {
+    if (ConfigManager::instance()->layoutLocked()) {
+        event->ignore();
+        return;
+    }
+
     // 接受内部图标拖放和外部文件拖放
     if (event->mimeData()->hasFormat("application/x-deskgo-icon") || event->mimeData()->hasUrls()) {
         event->setDropAction(Qt::MoveAction);
@@ -2138,6 +2255,13 @@ void FenceWindow::dragEnterEvent(QDragEnterEvent *event)
 
 void FenceWindow::dragMoveEvent(QDragMoveEvent *event)
 {
+    if (ConfigManager::instance()->layoutLocked()) {
+        clearDropIndicator();
+        event->ignore();
+        update();
+        return;
+    }
+
     if (event->mimeData()->hasFormat("application/x-deskgo-icon") || event->mimeData()->hasUrls()) {
         event->setDropAction(Qt::MoveAction);
         event->accept();
@@ -2173,7 +2297,7 @@ void FenceWindow::dragMoveEvent(QDragMoveEvent *event)
                 if ((draggedIconIndex == 0 && targetIndex == 0) ||
                     (draggedIconIndex == m_icons.size() - 1 && targetIndex == m_icons.size()) ||
                     (targetIndex == draggedIconIndex || targetIndex == draggedIconIndex + 1)) {
-                    m_showDropIndicator = false;
+                    clearDropIndicator();
                     update();
                     return;
                 }
@@ -2190,7 +2314,7 @@ void FenceWindow::dragLeaveEvent(QDragLeaveEvent *event)
 {
     Q_UNUSED(event)
     m_hovered = false;
-    m_showDropIndicator = false;
+    clearDropIndicator();
     update();
 }
 
@@ -2198,6 +2322,14 @@ void FenceWindow::dragLeaveEvent(QDragLeaveEvent *event)
 // 移除这里的 getWinIcon 定义，移到头部
 void FenceWindow::dropEvent(QDropEvent *event)
 {
+    if (ConfigManager::instance()->layoutLocked()) {
+        m_hovered = false;
+        clearDropIndicator();
+        event->ignore();
+        update();
+        return;
+    }
+
     const QMimeData *mimeData = event->mimeData();
     logToDesktop("[dropEvent] Fence: " + m_title);
     logToDesktop("  hasFormat(x-deskgo-icon): " + QString(mimeData->hasFormat("application/x-deskgo-icon") ? "true" : "false"));
@@ -2287,7 +2419,7 @@ void FenceWindow::dropEvent(QDropEvent *event)
             
             event->acceptProposedAction();
             m_hovered = false;
-            m_showDropIndicator = false;  // 清除插入位置指示器
+            clearDropIndicator();
             update();
             return;
         }
@@ -2315,10 +2447,15 @@ void FenceWindow::dropEvent(QDropEvent *event)
             if (sourceFence && sourceFence != this) {
                 // 保存图标数据
                 IconWidget::IconData data = sourceIcon->data();
+                const int targetIndex = (m_showDropIndicator && m_dropIndicatorIndex >= 0)
+                    ? qMin(m_dropIndicatorIndex, m_icons.size())
+                    : m_icons.size();
                 
                 // 从源围栏移除（不删除文件，只从列表和布局中移除）
                 sourceFence->m_icons.removeOne(sourceIcon);
                 sourceFence->m_contentLayout->removeWidget(sourceIcon);
+                sourceFence->clearDropIndicator();
+                sourceFence->update();
                 
                 // 移动文件到新围栏的存储目录
                 QString storagePath = ConfigManager::instance()->fencesStoragePath() + "/" + m_id;
@@ -2356,17 +2493,27 @@ void FenceWindow::dropEvent(QDropEvent *event)
                 // 销毁旧的 IconWidget
                 sourceIcon->deleteLater();
                 
-                // 创建新的 IconWidget 并添加到当前围栏
+                // 创建新的 IconWidget 并按插入符位置插入到当前围栏
                 IconWidget *newIcon = new IconWidget(data);
-                addIcon(newIcon);
+                connect(newIcon, &IconWidget::removeRequested, [this, newIcon]() {
+                    removeIcon(newIcon);
+                });
+                insertIconAt(newIcon, targetIndex);
+                updatePlaceholder();
                 
                 emit sourceFence->geometryChanged();  // 触发源围栏保存
                 emit geometryChanged();  // 触发当前围栏保存
+
+                FenceManager::instance()->saveFences();
+                if (!ConfigManager::instance()->sync()) {
+                    logToDesktop("[dropEvent] Cross-fence move committed in memory but failed to sync immediately.");
+                }
             }
         }
         
         event->acceptProposedAction();
         m_hovered = false;
+        clearDropIndicator();
         update();
         return;
     }
@@ -2395,27 +2542,27 @@ void FenceWindow::dropEvent(QDropEvent *event)
                 QString srcPath = QDir::toNativeSeparators(url.toLocalFile());
                 qDebug() << "    srcPath:" << srcPath;
                 QFileInfo fileInfo(srcPath);
-                QString absolutePath = fileInfo.absolutePath();
+                QString absolutePath = normalizePath(fileInfo.absolutePath());
+                QString normalizedDesktopPath = normalizePath(desktopPath);
+                QString normalizedPublicDesktopPath = normalizePath(publicDesktopPath);
                 
-                bool isDesktopFile = absolutePath.compare(desktopPath, Qt::CaseInsensitive) == 0 ||
-                                     absolutePath.compare(publicDesktopPath, Qt::CaseInsensitive) == 0 ||
-                                     srcPath.contains("Desktop", Qt::CaseInsensitive);
+                bool isDesktopFile = absolutePath.compare(normalizedDesktopPath, Qt::CaseInsensitive) == 0 ||
+                                     absolutePath.compare(normalizedPublicDesktopPath, Qt::CaseInsensitive) == 0;
                 qDebug() << "    isDesktopFile:" << isDesktopFile;
 
                 QPoint originalPos(-1, -1);
                 QString targetPath = srcPath;
+                QString originalSourcePath;
                 bool moved = false;
 
                 if (isDesktopFile) {
                     originalPos = DesktopHelper::getIconPosition(srcPath);
                     qDebug() << "    originalPos:" << originalPos;
+                    originalSourcePath = normalizePath(srcPath);
                     
-                    // 1. 先通知系统文件即将被删除（立即隐藏图标）
-                    DesktopHelper::notifyFileRemoved(srcPath);
-                    
-                    // 2. 移动文件到存储目录
+                    // 先移动文件到存储目录，确认成功后再通知 shell 更新
                     QString newPath = storagePath + QDir::separator() + fileInfo.fileName();
-                    newPath = QDir::toNativeSeparators(QDir::cleanPath(newPath));
+                    newPath = normalizePath(newPath);
                     qDebug() << "    newPath:" << newPath;
                     
                     qDebug() << "    Attempting to move file...";
@@ -2436,22 +2583,18 @@ void FenceWindow::dropEvent(QDropEvent *event)
                         
                         // 尝试 Qt 复制
                         if (QFile::copy(srcPath, newPath)) {
-                            ok = true;
+                            ok = QFile::remove(srcPath);
                         } else {
                             // 终极回退：使用 Windows 原生 WinAPI 进行复制
                             // 这通常能解决 Qt 报 "Unknown error" 的底层权限/锁定问题
                             qDebug() << "    Qt copy failed, trying WinAPI CopyFileW...";
                             if (CopyFileW((const wchar_t*)srcPath.utf16(), (const wchar_t*)newPath.utf16(), FALSE)) {
-                                ok = true;
+                                ok = QFile::remove(srcPath);
                             }
                         }
 
-                        if (ok) {
-                            qDebug() << "    Copy successful. Attempting to remove source...";
-                            if (!QFile::remove(srcPath)) {
-                                qDebug() << "    WARNING: Source removal failed, but copy succeeded.";
-                            }
-                        } else {
+                        if (!ok) {
+                            QFile::remove(newPath);
                             qDebug() << "    Move FAILED even with WinAPI!";
                         }
                     }
@@ -2459,12 +2602,12 @@ void FenceWindow::dropEvent(QDropEvent *event)
                     if (ok) {
                         targetPath = newPath;
                         moved = true;
+                        DesktopHelper::notifyFileRemoved(srcPath);
                         qDebug() << "    Move SUCCESS!";
                     } else {
                         qDebug() << "    Move FATAL! Source:" << srcPath;
-                        QMessageBox::critical(this, "拥有权错误", 
-                            "无法移动文件: " + fileInfo.fileName() + 
-                            "\n\n请尝试以管理员身份运行程序，或检查该文件是否被其他程序占用。");
+                        QMessageBox::critical(this, tr("Permission Error"),
+                            tr("Cannot move file: %1\n\nTry running as administrator, or check if the file is in use.").arg(fileInfo.fileName()));
                         continue;
                     }
                 } else {
@@ -2480,24 +2623,15 @@ void FenceWindow::dropEvent(QDropEvent *event)
                 QFileInfo newFileInfo(targetPath);
                 
                 IconWidget::IconData data;
-                data.name = newFileInfo.completeBaseName();
-                
-                // 处理快捷方式和网络快捷方式的名称
-                if (targetPath.endsWith(".lnk", Qt::CaseInsensitive) || targetPath.endsWith(".url", Qt::CaseInsensitive)) {
-                     data.name = newFileInfo.fileName();
-                     if (data.name.endsWith(".lnk", Qt::CaseInsensitive)) {
-                         data.name.chop(4);
-                     } else if (data.name.endsWith(".url", Qt::CaseInsensitive)) {
-                         data.name.chop(4);
-                     }
-                }
+                data.name = displayNameForFile(newFileInfo);
                 
                 data.path = targetPath;
                 data.targetPath = targetPath;
+                data.originalSourcePath = originalSourcePath;
                 qDebug() << "    Creating icon with name:" << data.name << "path:" << data.path;
                 
                 // 优先使用 WinAPI 获取图标
-                data.icon = getWinIcon(targetPath);
+                data.icon = IconHelper::getWinIcon(targetPath);
                 qDebug() << "    getWinIcon result:" << (data.icon.isNull() ? "NULL" : QString("OK, size: %1x%2").arg(data.icon.width()).arg(data.icon.height()));
                 
                 if (data.icon.isNull()) {
@@ -2515,6 +2649,42 @@ void FenceWindow::dropEvent(QDropEvent *event)
                 
                 IconWidget *iconWidget = new IconWidget(data);
                 addIcon(iconWidget);
+
+                if (moved) {
+                    FenceManager::instance()->saveFences();
+                    if (!ConfigManager::instance()->sync()) {
+                        logToDesktop("[dropEvent] Immediate sync failed after desktop file move, rolling back file move.");
+                        m_icons.removeOne(iconWidget);
+                        m_contentLayout->removeWidget(iconWidget);
+                        iconWidget->hide();
+                        iconWidget->deleteLater();
+                        updatePlaceholder();
+
+                        QString rollbackTarget = originalSourcePath;
+                        if (!rollbackTarget.isEmpty() &&
+                            normalizePath(targetPath).compare(rollbackTarget, Qt::CaseInsensitive) != 0 &&
+                            QFile::exists(targetPath)) {
+                            if (QFile::exists(rollbackTarget)) {
+                                QFile::remove(rollbackTarget);
+                            }
+                            if (QFile::rename(targetPath, rollbackTarget) || QFile::copy(targetPath, rollbackTarget)) {
+                                if (QFile::exists(targetPath) &&
+                                    normalizePath(targetPath).compare(rollbackTarget, Qt::CaseInsensitive) != 0) {
+                                    QFile::remove(targetPath);
+                                }
+                                DesktopHelper::notifyFileAdded(rollbackTarget);
+                                if (originalPos.x() >= 0 && originalPos.y() >= 0) {
+                                    DesktopHelper::setIconPosition(rollbackTarget, originalPos);
+                                }
+                            }
+                        }
+
+                        FenceManager::instance()->saveFences();
+                        QMessageBox::critical(this, tr("Save Failed"),
+                            tr("DeskGo moved the desktop file, but could not safely persist the fence state. The file has been restored to the desktop."));
+                        continue;
+                    }
+                }
             }
         }
         
@@ -2523,12 +2693,13 @@ void FenceWindow::dropEvent(QDropEvent *event)
     }
     
     m_hovered = false;
-    m_showDropIndicator = false;  // 清除插入位置指示器
+    clearDropIndicator();
     update();
 }
 
 void FenceWindow::startTitleEdit()
 {
+    if (ConfigManager::instance()->layoutLocked()) return;
     if (m_titleEdit) return;  // 已经在编辑中
     
     // 获取标题标签的实际位置
@@ -2541,17 +2712,7 @@ void FenceWindow::startTitleEdit()
     m_titleEdit = new QLineEdit(m_title, this);
     m_titleEdit->setGeometry(labelGeom);
     m_titleEdit->setAlignment(Qt::AlignCenter);
-    m_titleEdit->setStyleSheet(R"(
-        QLineEdit {
-            color: #ffffff;
-            font-size: 12px;
-            font-weight: 500;
-            background: transparent;
-            border: none;
-            border-bottom: 2px solid rgba(100, 150, 255, 0.8);
-            padding: 0 10px;
-        }
-    )");
+    m_titleEdit->setStyleSheet(StyleHelper::titleEditStyle());
     m_titleEdit->selectAll();
     m_titleEdit->show();
     m_titleEdit->raise();

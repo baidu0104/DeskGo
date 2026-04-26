@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>DeskGo</Name>
+    <Version>1.5.2</Version>
+    <Title>DeskGo</Title>
+    <Publisher>cloud</Publisher>
+    <StartMenuDir>DeskGo</StartMenuDir>
+    <TargetDir>@ApplicationsDir@/DeskGo</TargetDir>
+</Installer>

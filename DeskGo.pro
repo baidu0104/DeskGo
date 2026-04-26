@@ -17,7 +17,8 @@ SOURCES += \
     src/core/fencemanager.cpp \
     src/core/configmanager.cpp \
     src/platform/blurhelper.cpp \
-    src/platform/desktophelper.cpp
+    src/platform/desktophelper.cpp \
+    src/core/iconhelper.cpp
 
 # 头文件
 HEADERS += \
@@ -27,7 +28,9 @@ HEADERS += \
     src/core/fencemanager.h \
     src/core/configmanager.h \
     src/platform/blurhelper.h \
-    src/platform/desktophelper.h
+    src/platform/desktophelper.h \
+    src/ui/stylehelper.h \
+    src/core/iconhelper.h
 
 # 资源文件
 RESOURCES += \
@@ -48,3 +51,8 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 # Trigger Rebuild for Resources - Added PNG
+
+# 国际化翻译文件
+TRANSLATIONS += \
+    i18n/deskgo_zh_CN.ts \
+    i18n/deskgo_en_US.ts

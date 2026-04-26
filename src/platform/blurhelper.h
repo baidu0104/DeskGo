@@ -3,6 +3,8 @@
 
 #include <QWidget>
 #include <QColor>
+#include <QMenu>
+#include <QTimer>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -56,6 +58,13 @@ public:
      * @return 是否为 Windows 11+
      */
     static bool isWindows11();
+    
+    /**
+     * @brief 统一设置无边框菜单的属性和圆角效果
+     * @param menu 目标菜单
+     * @param radius 圆角半径
+     */
+    static void setupFramelessMenu(QMenu *menu, int radius = 12);
 
 private:
 #ifdef Q_OS_WIN

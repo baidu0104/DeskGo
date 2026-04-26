@@ -1,11 +1,14 @@
 #include "fencemanager.h"
 #include "../ui/fencewindow.h"
 #include "configmanager.h"
+#include "iconhelper.h"
 #include "../platform/blurhelper.h"
 
 #include <QApplication>
 #include <QScreen>
+#include <QHash>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QMenu>
 #include <QAction>
 #include <QMessageBox>
@@ -18,16 +21,374 @@
 #include <QDateTime>
 #include <QStandardPaths>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDebug>
+#include <QSaveFile>
+#include <QTemporaryDir>
 #include <QWidgetAction>
 #include <QEvent>
 #include <QMouseEvent>
 #include <QTimer>
+#include <QPainter>
+#include <QPixmap>
+#include <QPen>
+#include <QColor>
+#include <QPointF>
 
 
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
+
+namespace {
+const char *kBackupManifestFileName = "external_icon_manifest.json";
+const char *kBackupExternalDirName = "external_icons";
+
+QString normalizeNativePath(const QString &path)
+{
+    return QDir::toNativeSeparators(QDir::cleanPath(path));
+}
+
+bool shouldTreatEntryAsFile(const QFileInfo &entry)
+{
+    const QString suffix = entry.suffix().toLower();
+    if (suffix == "lnk" || suffix == "url") {
+        return true;
+    }
+
+    return entry.isSymLink();
+}
+
+bool copyFileReplacing(const QString &sourcePath, const QString &targetPath, QString *errorMessage)
+{
+    const QString normalizedSource = normalizeNativePath(sourcePath);
+    const QString normalizedTarget = normalizeNativePath(targetPath);
+
+    QFileInfo targetInfo(normalizedTarget);
+    QDir().mkpath(targetInfo.absolutePath());
+
+    if (QFile::exists(normalizedTarget) && !QFile::remove(normalizedTarget)) {
+        if (errorMessage) {
+            *errorMessage = QString("无法覆盖文件：%1").arg(normalizedTarget);
+        }
+        return false;
+    }
+
+    if (!QFile::copy(normalizedSource, normalizedTarget)) {
+        if (errorMessage) {
+            *errorMessage = QString("复制文件失败：%1 -> %2").arg(normalizedSource, normalizedTarget);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool copyDirectoryRecursively(const QString &sourceDirPath, const QString &targetDirPath, QString *errorMessage)
+{
+    QDir sourceDir(normalizeNativePath(sourceDirPath));
+    if (!sourceDir.exists()) {
+        if (errorMessage) {
+            *errorMessage = QString("源目录不存在：%1").arg(sourceDir.absolutePath());
+        }
+        return false;
+    }
+
+    QDir targetDir(normalizeNativePath(targetDirPath));
+    if (!targetDir.exists() && !QDir().mkpath(targetDir.absolutePath())) {
+        if (errorMessage) {
+            *errorMessage = QString("无法创建目录：%1").arg(targetDir.absolutePath());
+        }
+        return false;
+    }
+
+    const QFileInfoList entries = sourceDir.entryInfoList(
+        QDir::NoDotAndDotDot | QDir::Files | QDir::Dirs | QDir::Hidden | QDir::System);
+
+    for (const QFileInfo &entry : entries) {
+        const QString sourcePath = entry.absoluteFilePath();
+        const QString targetPath = normalizeNativePath(targetDir.absoluteFilePath(entry.fileName()));
+
+        if (entry.isDir() && !shouldTreatEntryAsFile(entry)) {
+            if (!copyDirectoryRecursively(sourcePath, targetPath, errorMessage)) {
+                return false;
+            }
+            continue;
+        }
+
+        if (!copyFileReplacing(sourcePath, targetPath, errorMessage)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool writeJsonObjectToFile(const QString &path, const QJsonObject &jsonObject, QString *errorMessage)
+{
+    QSaveFile file(normalizeNativePath(path));
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (errorMessage) {
+            *errorMessage = QString("无法写入文件：%1").arg(path);
+        }
+        return false;
+    }
+
+    const QByteArray jsonData = QJsonDocument(jsonObject).toJson(QJsonDocument::Indented);
+    if (file.write(jsonData) != jsonData.size()) {
+        if (errorMessage) {
+            *errorMessage = QString("写入 JSON 失败：%1").arg(path);
+        }
+        file.cancelWriting();
+        return false;
+    }
+
+    if (!file.commit()) {
+        if (errorMessage) {
+            *errorMessage = QString("提交 JSON 文件失败：%1").arg(path);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool readJsonObjectFromFile(const QString &path, QJsonObject *jsonObject, QString *errorMessage)
+{
+    QFile file(normalizeNativePath(path));
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (errorMessage) {
+            *errorMessage = QString("无法读取文件：%1").arg(path);
+        }
+        return false;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (document.isNull() || parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        if (errorMessage) {
+            *errorMessage = QString("解析 JSON 失败：%1").arg(path);
+        }
+        return false;
+    }
+
+    if (jsonObject) {
+        *jsonObject = document.object();
+    }
+    return true;
+}
+
+QString uniqueStorageFileName(const QString &directoryPath, const QString &preferredFileName)
+{
+    QFileInfo preferredInfo(preferredFileName);
+    const QString baseName = preferredInfo.completeBaseName().isEmpty() ? "icon" : preferredInfo.completeBaseName();
+    const QString suffix = preferredInfo.suffix();
+
+    QString candidate = preferredInfo.fileName();
+    if (candidate.isEmpty()) {
+        candidate = suffix.isEmpty() ? baseName : QString("%1.%2").arg(baseName, suffix);
+    }
+
+    QDir directory(normalizeNativePath(directoryPath));
+    if (!directory.exists()) {
+        QDir().mkpath(directory.absolutePath());
+    }
+
+    int index = 1;
+    while (QFile::exists(normalizeNativePath(directory.absoluteFilePath(candidate)))) {
+        candidate = suffix.isEmpty()
+            ? QString("%1_%2").arg(baseName).arg(index)
+            : QString("%1_%2.%3").arg(baseName).arg(index).arg(suffix);
+        ++index;
+    }
+
+    return candidate;
+}
+
+bool prepareBackupBundle(const QString &appDataDir, const QString &bundleDir, QString *errorMessage, int *bundledExternalCount, int *missingExternalCount)
+{
+    const QString normalizedAppDataDir = normalizeNativePath(appDataDir);
+    const QString normalizedBundleDir = normalizeNativePath(bundleDir);
+    const QString fencesJsonPath = normalizeNativePath(normalizedAppDataDir + "/fencing_config.json");
+    const QString fencesStoragePath = normalizeNativePath(normalizedAppDataDir + "/fences_storage");
+    const QString userSettingsPath = normalizeNativePath(normalizedAppDataDir + "/user_settings.ini");
+
+    if (bundledExternalCount) {
+        *bundledExternalCount = 0;
+    }
+    if (missingExternalCount) {
+        *missingExternalCount = 0;
+    }
+
+    if (QFile::exists(fencesJsonPath) &&
+        !copyFileReplacing(fencesJsonPath, normalizedBundleDir + "/fencing_config.json", errorMessage)) {
+        return false;
+    }
+
+    if (QDir(fencesStoragePath).exists() &&
+        !copyDirectoryRecursively(fencesStoragePath, normalizedBundleDir + "/fences_storage", errorMessage)) {
+        return false;
+    }
+
+    if (QFile::exists(userSettingsPath) &&
+        !copyFileReplacing(userSettingsPath, normalizedBundleDir + "/user_settings.ini", errorMessage)) {
+        return false;
+    }
+
+    QJsonObject fencesData;
+    if (!QFile::exists(fencesJsonPath)) {
+        return true;
+    }
+    if (!readJsonObjectFromFile(fencesJsonPath, &fencesData, errorMessage)) {
+        return false;
+    }
+
+    const QString storageRoot = normalizeNativePath(ConfigManager::instance()->fencesStoragePath());
+    const QString storageRootPrefix = storageRoot.endsWith(QDir::separator())
+        ? storageRoot
+        : storageRoot + QDir::separator();
+    const QJsonArray fencesArray = fencesData.value("fences").toArray();
+    QJsonArray manifestArray;
+
+    for (const QJsonValue &fenceValue : fencesArray) {
+        const QJsonObject fenceObject = fenceValue.toObject();
+        const QString fenceId = fenceObject.value("id").toString();
+        const QJsonArray iconsArray = fenceObject.value("icons").toArray();
+
+        for (const QJsonValue &iconValue : iconsArray) {
+            const QJsonObject iconObject = iconValue.toObject();
+            const QString savedPath = iconObject.value("path").toString();
+            if (savedPath.isEmpty() || savedPath.startsWith("storage:", Qt::CaseInsensitive)) {
+                continue;
+            }
+
+            const QString resolvedPath = normalizeNativePath(IconHelper::fromStoragePath(savedPath, fenceId));
+            if (resolvedPath.startsWith(storageRootPrefix, Qt::CaseInsensitive)) {
+                continue;
+            }
+
+            QFileInfo fileInfo(resolvedPath);
+            if (!fileInfo.exists() || !fileInfo.isFile()) {
+                if (missingExternalCount) {
+                    ++(*missingExternalCount);
+                }
+                continue;
+            }
+
+            const QByteArray hash = QCryptographicHash::hash(
+                resolvedPath.toUtf8(), QCryptographicHash::Sha1).toHex();
+            const QString bundleFileName = QString("%1_%2").arg(QString::fromLatin1(hash.left(12)), fileInfo.fileName());
+            const QString bundleRelativePath = QString("%1/%2").arg(kBackupExternalDirName, bundleFileName);
+            const QString bundleAbsolutePath = normalizeNativePath(normalizedBundleDir + "/" + bundleRelativePath);
+
+            if (!copyFileReplacing(resolvedPath, bundleAbsolutePath, errorMessage)) {
+                return false;
+            }
+
+            QJsonObject manifestObject;
+            manifestObject["fenceId"] = fenceId;
+            manifestObject["savedPath"] = savedPath;
+            manifestObject["bundledPath"] = bundleRelativePath;
+            manifestObject["fileName"] = fileInfo.fileName();
+            manifestArray.append(manifestObject);
+
+            if (bundledExternalCount) {
+                ++(*bundledExternalCount);
+            }
+        }
+    }
+
+    if (manifestArray.isEmpty()) {
+        return true;
+    }
+
+    QJsonObject manifestRoot;
+    manifestRoot["version"] = 1;
+    manifestRoot["externalIcons"] = manifestArray;
+    return writeJsonObjectToFile(normalizedBundleDir + "/" + kBackupManifestFileName, manifestRoot, errorMessage);
+}
+
+bool materializeBundledIconsIntoStorage(const QString &bundleRootDir, QString *errorMessage)
+{
+    const QString manifestPath = normalizeNativePath(bundleRootDir + "/" + kBackupManifestFileName);
+    if (!QFile::exists(manifestPath)) {
+        return true;
+    }
+
+    const QString fencesJsonPath = normalizeNativePath(bundleRootDir + "/fencing_config.json");
+    if (!QFile::exists(fencesJsonPath)) {
+        return true;
+    }
+
+    QJsonObject manifestRoot;
+    if (!readJsonObjectFromFile(manifestPath, &manifestRoot, errorMessage)) {
+        return false;
+    }
+
+    QJsonObject fencesData;
+    if (!readJsonObjectFromFile(fencesJsonPath, &fencesData, errorMessage)) {
+        return false;
+    }
+
+    QHash<QString, QJsonObject> manifestByKey;
+    const QJsonArray manifestArray = manifestRoot.value("externalIcons").toArray();
+    for (const QJsonValue &value : manifestArray) {
+        const QJsonObject object = value.toObject();
+        const QString key = object.value("fenceId").toString() + "|" + object.value("savedPath").toString();
+        manifestByKey.insert(key, object);
+    }
+
+    const QString storageRoot = normalizeNativePath(bundleRootDir + "/fences_storage");
+    QDir().mkpath(storageRoot);
+
+    QJsonArray fencesArray = fencesData.value("fences").toArray();
+    for (int fenceIndex = 0; fenceIndex < fencesArray.size(); ++fenceIndex) {
+        QJsonObject fenceObject = fencesArray.at(fenceIndex).toObject();
+        const QString fenceId = fenceObject.value("id").toString();
+        QJsonArray iconsArray = fenceObject.value("icons").toArray();
+
+        for (int iconIndex = 0; iconIndex < iconsArray.size(); ++iconIndex) {
+            QJsonObject iconObject = iconsArray.at(iconIndex).toObject();
+            const QString savedPath = iconObject.value("path").toString();
+            const QString key = fenceId + "|" + savedPath;
+            if (!manifestByKey.contains(key)) {
+                continue;
+            }
+
+            const QJsonObject manifestObject = manifestByKey.value(key);
+            const QString bundledPath = normalizeNativePath(bundleRootDir + "/" + manifestObject.value("bundledPath").toString());
+            QFileInfo bundledInfo(bundledPath);
+            if (!bundledInfo.exists() || !bundledInfo.isFile()) {
+                if (errorMessage) {
+                    *errorMessage = QString("备份内缺少图标文件：%1").arg(bundledPath);
+                }
+                return false;
+            }
+
+            const QString fenceStorageDir = normalizeNativePath(storageRoot + "/" + fenceId);
+            const QString preferredName = manifestObject.value("fileName").toString().isEmpty()
+                ? bundledInfo.fileName()
+                : manifestObject.value("fileName").toString();
+            const QString uniqueFileName = uniqueStorageFileName(fenceStorageDir, preferredName);
+            const QString storageTargetPath = normalizeNativePath(fenceStorageDir + "/" + uniqueFileName);
+
+            if (!copyFileReplacing(bundledPath, storageTargetPath, errorMessage)) {
+                return false;
+            }
+
+            iconObject["path"] = QString("storage:%1").arg(uniqueFileName);
+            iconsArray.replace(iconIndex, iconObject);
+        }
+
+        fenceObject["icons"] = iconsArray;
+        fencesArray.replace(fenceIndex, fenceObject);
+    }
+
+    fencesData["fences"] = fencesArray;
+    return writeJsonObjectToFile(fencesJsonPath, fencesData, errorMessage);
+}
+}
+
 FenceManager* FenceManager::instance()
 {
     static FenceManager *instance = new FenceManager();
@@ -75,14 +436,19 @@ void FenceManager::initialize()
 void FenceManager::shutdown()
 {
     if (m_isShutdown) return;
-    m_isShutdown = true;    
+
     // 先停止所有围栏的保存定时器，并立即触发保存
     for (FenceWindow *fence : m_fences) {
         if (fence) {
             fence->flushPendingSave();
         }
     }
-    
+
+    // 强制再执行一次整体保存，确保所有变动落盘
+    saveFences();
+
+    m_isShutdown = true;
+
     // 等待一小段时间，确保所有信号都被处理
     QCoreApplication::processEvents();
 
@@ -172,7 +538,7 @@ void FenceManager::setupTrayIcon()
             background: rgba(255, 255, 255, 0.1);
             margin: 6px 12px;
         }
-        QLabel#actionLabel {
+        QLabel#actionLabel, QWidget#actionLabel {
             color: #ffffff;
             font-family: "Microsoft YaHei", "Segoe UI";
             font-size: 13px;
@@ -180,7 +546,7 @@ void FenceManager::setupTrayIcon()
             padding: 8px 0px;
             background: transparent;
         }
-        QLabel#actionLabel:hover {
+        QLabel#actionLabel:hover, QWidget#actionLabel:hover {
             background-color: rgba(255, 255, 255, 0.1);
         }
     )";
@@ -203,20 +569,47 @@ void FenceManager::setupTrayIcon()
     });
 #endif
 
-    // 统一创建居中 QWidgetAction 的助手（无需任何 spacer）
-    auto addCenteredAction = [&](const QString &text) -> QLabel* {
-        QWidgetAction *wa = new QWidgetAction(m_trayMenu);
-        QLabel *lbl = new QLabel(text);
-        lbl->setObjectName("actionLabel");
-        lbl->setAlignment(Qt::AlignCenter);
-        lbl->setCursor(Qt::PointingHandCursor);
-        lbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        lbl->installEventFilter(this);
-        wa->setDefaultWidget(lbl);
-        m_trayMenu->addAction(wa);
-        return lbl;
+    auto addMainRow = [&](const QString &text, const QString &role) -> QWidgetAction* {
+        QWidgetAction *action = new QWidgetAction(m_trayMenu);
+        QWidget *widget = new QWidget();
+        widget->setObjectName("actionLabel");
+        widget->setProperty("actionRole", role);
+        widget->setCursor(Qt::PointingHandCursor);
+        widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        widget->installEventFilter(this);
+
+        QHBoxLayout *layout = new QHBoxLayout(widget);
+        layout->setContentsMargins(8, 8, 12, 8);
+        layout->setSpacing(4);
+
+        QLabel *check = new QLabel();
+        check->setFixedSize(16, 16);
+        check->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+        QLabel *label = new QLabel(text);
+        label->setStyleSheet("color: #ffffff; font-family: \"Microsoft YaHei\",\"Segoe UI\"; font-size: 13px; background: transparent;");
+        label->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+        layout->addWidget(check);
+        layout->addWidget(label);
+        layout->addStretch();
+
+        action->setDefaultWidget(widget);
+        m_trayMenu->addAction(action);
+        return action;
     };
 
+    const QPixmap checkedPixmap = []() {
+        QPixmap pixmap(16, 16);
+        pixmap.fill(Qt::transparent);
+
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor("#4CAF50"), 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawLine(QPointF(3.0, 8.5), QPointF(6.5, 12.0));
+        painter.drawLine(QPointF(6.5, 12.0), QPointF(13.0, 4.0));
+        return pixmap;
+    }();
     // ---- 围栏管理子菜单 ----
     QMenu *fenceMenu = new QMenu("围栏管理", m_trayMenu);
     fenceMenu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
@@ -225,30 +618,75 @@ void FenceManager::setupTrayIcon()
     fenceMenu->setContentsMargins(1, 1, 1, 1);
     fenceMenu->setStyleSheet(kSubMenuStyle);
 
-    QAction *newFenceAction     = fenceMenu->addAction("新建围栏");
-    QAction *toggleFencesAction = fenceMenu->addAction(m_fencesVisible ? "隐藏全部围栏" : "显示全部围栏");
-    QAction *toggleTextAction   = fenceMenu->addAction(ConfigManager::instance()->iconTextVisible() ? "隐藏图标文字" : "显示图标文字");
+    auto addFenceRow = [&](const QString &text, const QString &role, QLabel **checkLabel, QLabel **textLabel, QWidget **rowWidget) -> QWidgetAction* {
+        QWidgetAction *action = new QWidgetAction(fenceMenu);
+        QWidget *widget = new QWidget();
+        widget->setObjectName("actionLabel");
+        widget->setProperty("actionRole", role);
+        widget->setCursor(Qt::PointingHandCursor);
+        widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        widget->installEventFilter(this);
 
-    connect(newFenceAction, &QAction::triggered, this, [this]() {
-        QTimer::singleShot(10, this, [this]() { onNewFenceRequested(); });
-    });
-    connect(toggleFencesAction, &QAction::triggered, this, [this, toggleFencesAction]() {
-        QTimer::singleShot(50, this, [this, toggleFencesAction]() {
-            m_fencesVisible ? hideAllFences() : showAllFences();
-            if (toggleFencesAction)
-                toggleFencesAction->setText(m_fencesVisible ? "隐藏全部围栏" : "显示全部围栏");
-        });
-    });
-    connect(toggleTextAction, &QAction::triggered, this, []() {
-        QTimer::singleShot(10, []() {
-            ConfigManager::instance()->setIconTextVisible(!ConfigManager::instance()->iconTextVisible());
-        });
-    });
+        QHBoxLayout *layout = new QHBoxLayout(widget);
+        layout->setContentsMargins(8, 8, 12, 8);
+        layout->setSpacing(4);
 
+        QLabel *check = new QLabel();
+        check->setFixedSize(16, 16);
+        check->setAlignment(Qt::AlignCenter);
+        check->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+        QLabel *label = new QLabel(text);
+        label->setStyleSheet("color: #ffffff; font-family: \"Microsoft YaHei\",\"Segoe UI\"; font-size: 13px; background: transparent;");
+        label->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+        layout->addWidget(check);
+        layout->addWidget(label);
+        layout->addStretch();
+
+        action->setDefaultWidget(widget);
+        fenceMenu->addAction(action);
+
+        if (checkLabel)
+            *checkLabel = check;
+        if (textLabel)
+            *textLabel = label;
+        if (rowWidget)
+            *rowWidget = widget;
+        return action;
+    };
+
+    QLabel *hideAllCheckLbl = nullptr;
+    QLabel *lockCheckLbl = nullptr;
+    QWidget *newFenceWidget = nullptr;
+
+    QWidgetAction *newFenceAction = addFenceRow("新建围栏", "newFence", nullptr, nullptr, &newFenceWidget);
+    addFenceRow("隐藏全部围栏", "toggleFencesAndText", &hideAllCheckLbl, nullptr, nullptr);
+    addFenceRow("锁定布局", "layoutLock", &lockCheckLbl, nullptr, nullptr);
+
+    auto updateHideAllAction = [hideAllCheckLbl, checkedPixmap](bool hidden) {
+        if (hideAllCheckLbl)
+            hideAllCheckLbl->setPixmap(hidden ? checkedPixmap : QPixmap());
+    };
+    updateHideAllAction(!m_fencesVisible && !ConfigManager::instance()->iconTextVisible());
+
+    auto updateLockAction = [lockCheckLbl, checkedPixmap](bool locked) {
+        if (lockCheckLbl)
+            lockCheckLbl->setPixmap(locked ? checkedPixmap : QPixmap());
+    };
+    updateLockAction(ConfigManager::instance()->layoutLocked());
+    auto updateNewFenceEnabled = [newFenceAction, newFenceWidget](bool enabled) {
+        if (newFenceAction)
+            newFenceAction->setEnabled(enabled);
+        if (newFenceWidget)
+            newFenceWidget->setEnabled(enabled);
+    };
+    updateNewFenceEnabled(!ConfigManager::instance()->layoutLocked());
 #ifdef Q_OS_WIN
-    connect(fenceMenu, &QMenu::aboutToShow, this, [fenceMenu, toggleFencesAction, this]() {
-        if (toggleFencesAction)
-            toggleFencesAction->setText(m_fencesVisible ? "隐藏全部围栏" : "显示全部围栏");
+    connect(fenceMenu, &QMenu::aboutToShow, this, [fenceMenu, updateHideAllAction, updateLockAction, updateNewFenceEnabled, this]() {
+        updateHideAllAction(!m_fencesVisible && !ConfigManager::instance()->iconTextVisible());
+        updateLockAction(ConfigManager::instance()->layoutLocked());
+        updateNewFenceEnabled(!ConfigManager::instance()->layoutLocked());
         QTimer::singleShot(10, fenceMenu, [fenceMenu]() {
             if (!fenceMenu) return;
             BlurHelper::enableRoundedCorners(fenceMenu, 12);
@@ -288,40 +726,35 @@ void FenceManager::setupTrayIcon()
     m_trayMenu->addMenu(dataMenu);
     m_trayMenu->addSeparator();
 
-    // ---- 开机自启：三列布局确保文字永远处于菜单正中心 ----
+    // ---- 开机自启 ----
     QWidgetAction *autoStartWa = new QWidgetAction(m_trayMenu);
     QWidget *autoStartWidget = new QWidget();
     autoStartWidget->setObjectName("actionLabel");
+    autoStartWidget->setProperty("actionRole", "autoStart");
     autoStartWidget->setCursor(Qt::PointingHandCursor);
     autoStartWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     autoStartWidget->installEventFilter(this);
 
     QHBoxLayout *asLayout = new QHBoxLayout(autoStartWidget);
-    asLayout->setContentsMargins(0, 8, 0, 8);
-    asLayout->setSpacing(0);
+    asLayout->setContentsMargins(8, 8, 12, 8);
+    asLayout->setSpacing(4);
 
     QLabel *checkLbl = new QLabel();
-    checkLbl->setFixedWidth(20);
+    checkLbl->setFixedSize(16, 16);
     checkLbl->setAlignment(Qt::AlignCenter);
-    checkLbl->setStyleSheet("color: #4CAF50; font-size: 13px; background: transparent;");
+    checkLbl->setStyleSheet("background: transparent;");
     checkLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
 
     QLabel *autoTextLbl = new QLabel("开机自启");
-    autoTextLbl->setAlignment(Qt::AlignCenter);
-    autoTextLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     autoTextLbl->setStyleSheet("color: #ffffff; font-family: \"Microsoft YaHei\",\"Segoe UI\"; font-size: 13px; background: transparent;");
     autoTextLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
 
-    QLabel *balanceLbl = new QLabel();
-    balanceLbl->setFixedWidth(20);
-    balanceLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
-
     asLayout->addWidget(checkLbl);
-    asLayout->addWidget(autoTextLbl, 1);
-    asLayout->addWidget(balanceLbl);
+    asLayout->addWidget(autoTextLbl);
+    asLayout->addStretch();
 
-    auto updateAutoStartLabel = [checkLbl](bool checked) {
-        checkLbl->setText(checked ? "✔" : "");
+    auto updateAutoStartLabel = [checkLbl, checkedPixmap](bool checked) {
+        checkLbl->setPixmap(checked ? checkedPixmap : QPixmap());
     };
     updateAutoStartLabel(ConfigManager::instance()->autoStart());
     connect(ConfigManager::instance(), &ConfigManager::autoStartChanged, this, updateAutoStartLabel);
@@ -330,8 +763,8 @@ void FenceManager::setupTrayIcon()
     m_trayMenu->addAction(autoStartWa);
 
     m_trayMenu->addSeparator();
-    addCenteredAction("关于 DeskGo");
-    addCenteredAction("退出应用");
+    addMainRow("关于", "about");
+    addMainRow("退出应用", "exit");
 
     m_trayIcon->setContextMenu(m_trayMenu);
     connect(m_trayIcon, &QSystemTrayIcon::activated, this, &FenceManager::onTrayIconActivated);
@@ -339,12 +772,15 @@ void FenceManager::setupTrayIcon()
     m_trayIcon->show();
 
     // 监听配置变化，实时更新所有围栏
-    connect(ConfigManager::instance(), &ConfigManager::iconTextVisibleChanged, this, [this, toggleTextAction](bool visible) {
+    connect(ConfigManager::instance(), &ConfigManager::iconTextVisibleChanged, this, [this, updateHideAllAction](bool visible) {
         for (FenceWindow *fence : m_fences) {
             if (fence) fence->setIconTextVisible(visible);
         }
-        if (toggleTextAction)
-            toggleTextAction->setText(visible ? "隐藏图标文字" : "显示图标文字");
+        updateHideAllAction(!m_fencesVisible && !visible);
+    });
+    connect(ConfigManager::instance(), &ConfigManager::layoutLockedChanged, this, [updateLockAction, updateNewFenceEnabled](bool locked) {
+        updateLockAction(locked);
+        updateNewFenceEnabled(!locked);
     });
 }
 
@@ -352,20 +788,40 @@ bool FenceManager::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched->objectName() == "actionLabel") {
         if (event->type() == QEvent::MouseButtonRelease) {
-            m_trayMenu->close();
+            if (QWidget *widget = qobject_cast<QWidget*>(watched))
+                widget->window()->close();
+            else
+                m_trayMenu->close();
 
-            if (!qobject_cast<QLabel*>(watched)) {
+            const QString actionRole = watched->property("actionRole").toString();
+
+            if (actionRole == "autoStart") {
                 ConfigManager::instance()->setAutoStart(!ConfigManager::instance()->autoStart());
                 return true;
             }
-
-            QLabel *lbl = qobject_cast<QLabel*>(watched);
-            QString text = lbl->text();
-
-            if (text.contains("关于 DeskGo")) {
+            if (actionRole == "newFence") {
+                QTimer::singleShot(10, this, [this]() { onNewFenceRequested(); });
+                return true;
+            }
+            if (actionRole == "toggleFencesAndText") {
+                QTimer::singleShot(50, this, [this]() {
+                    const bool shouldHide = m_fencesVisible || ConfigManager::instance()->iconTextVisible();
+                    shouldHide ? hideAllFences() : showAllFences();
+                    ConfigManager::instance()->setIconTextVisible(!shouldHide);
+                });
+                return true;
+            }
+            if (actionRole == "layoutLock") {
+                ConfigManager::instance()->setLayoutLocked(!ConfigManager::instance()->layoutLocked());
+                return true;
+            }
+            if (actionRole == "about") {
                 QTimer::singleShot(10, this, [this]() { onAboutRequested(); });
-            } else if (text.contains("退出应用")) {
+                return true;
+            }
+            if (actionRole == "exit") {
                 QTimer::singleShot(10, this, [this]() { onExitRequested(); });
+                return true;
             }
             return true;
         }
@@ -397,6 +853,8 @@ FenceWindow* FenceManager::createFence(const QString &title)
 
 void FenceManager::removeFence(FenceWindow *fence)
 {
+    if (ConfigManager::instance()->layoutLocked()) return;
+
     if (fence && m_fences.contains(fence)) {
         // 先归还所有图标到桌面
         fence->restoreAllIcons();
@@ -419,6 +877,15 @@ void FenceManager::removeFence(FenceWindow *fence)
 
 void FenceManager::saveFences()
 {
+    if (m_isShutdown) return;
+
+    for (FenceWindow *fence : m_fences) {
+        if (fence && fence->isRestoringFromJson()) {
+            ConfigManager::writeLog("[saveFences] Skipped while fence is still restoring from JSON: " + fence->title());
+            return;
+        }
+    }
+
     QJsonArray fencesArray;
     for (FenceWindow *fence : m_fences) {
         fencesArray.append(fence->toJson());
@@ -517,6 +984,7 @@ void FenceManager::onFenceDeleteRequested(FenceWindow *fence)
 
 void FenceManager::onNewFenceRequested()
 {
+    if (ConfigManager::instance()->layoutLocked()) return;
     createFence("新围栏");
 }
 
@@ -543,7 +1011,7 @@ void FenceManager::onExitRequested()
 
 // ─────────────────────────────────────────────────────────────────
 // 围栏数据备份
-// 将 fencing_config.json 和 fences_storage 目录打包为 .zip
+// 将 fencing_config.json、fences_storage 以及围栏引用的外部图标文件打包为 .zip
 // 依赖 Windows PowerShell Compress-Archive（无需第三方库）
 // ─────────────────────────────────────────────────────────────────
 void FenceManager::onBackupFencesRequested()
@@ -575,19 +1043,25 @@ void FenceManager::onBackupFencesRequested()
     storageDir.cdUp();
     QString appDataDir = storageDir.absolutePath(); // .../AppData/Local/DeskGo
 
-    QString fencesJson   = appDataDir + "/fencing_config.json";
-    QString fencesStorage = appDataDir + "/fences_storage";
-    QString userSettings = appDataDir + "/user_settings.ini";
+    QTemporaryDir bundleDir;
+    if (!bundleDir.isValid()) {
+        QMessageBox::critical(nullptr, "备份失败", "无法创建临时备份目录。");
+        return;
+    }
 
-    // 构建 PowerShell 命令：把三个核心条目（配置、图标、样式）都打包进 zip
+    QString prepareError;
+    int bundledExternalCount = 0;
+    int missingExternalCount = 0;
+    if (!prepareBackupBundle(appDataDir, bundleDir.path(), &prepareError, &bundledExternalCount, &missingExternalCount)) {
+        QMessageBox::critical(nullptr, "备份失败",
+            QString("准备备份数据时出错：\n%1").arg(prepareError.isEmpty() ? "未知错误" : prepareError));
+        return;
+    }
+
+    const QString bundleRoot = normalizeNativePath(bundleDir.path());
     QString psCmd = QString(
-        "$items = @(); "
-        "if (Test-Path '%1') { $items += '%1' }; "
-        "if (Test-Path '%2') { $items += '%2' }; "
-        "if (Test-Path '%3') { $items += '%3' }; "
-        "if ($items.Count -gt 0) { Compress-Archive -Path $items -DestinationPath '%4' -Force } "
-        "else { Write-Error 'No source files found' }"
-    ).arg(fencesJson, fencesStorage, userSettings, savePath);
+        "Compress-Archive -Path '%1\\*' -DestinationPath '%2' -Force"
+    ).arg(bundleRoot, savePath);
 
     QProcess proc;
     proc.setProgram("powershell.exe");
@@ -596,7 +1070,14 @@ void FenceManager::onBackupFencesRequested()
     proc.waitForFinished(30000); // 最多等 30 秒
 
     if (proc.exitCode() == 0 && QFile::exists(savePath)) {
-        QMessageBox::information(nullptr, "备份成功", "围栏数据已成功备份");
+        QString message = "围栏数据已成功备份。";
+        if (bundledExternalCount > 0) {
+            message += QString("\n已额外打包 %1 个围栏引用的外部图标文件。").arg(bundledExternalCount);
+        }
+        if (missingExternalCount > 0) {
+            message += QString("\n另有 %1 个外部图标文件当前已丢失，无法收入本次备份。").arg(missingExternalCount);
+        }
+        QMessageBox::information(nullptr, "备份成功", message);
     } else {
         QString errMsg = QString::fromUtf8(proc.readAllStandardError());
         QMessageBox::critical(nullptr, "备份失败",
@@ -606,7 +1087,7 @@ void FenceManager::onBackupFencesRequested()
 
 // ─────────────────────────────────────────────────────────────────
 // 围栏数据还原
-// 从 .zip 中解压并覆盖 AppData 目录下的围栏数据，然后重启应用
+// 从 .zip 中解压、补齐外部图标文件并覆盖 AppData 目录下的围栏数据，然后重启应用
 // ─────────────────────────────────────────────────────────────────
 void FenceManager::onRestoreFencesRequested()
 {
@@ -640,16 +1121,23 @@ void FenceManager::onRestoreFencesRequested()
     // 先删除旧数据
     QString oldJson    = appDataDir + "/fencing_config.json";
     QString oldStorage = appDataDir + "/fences_storage";
+    QString oldSettings = appDataDir + "/user_settings.ini";
 
     // 关键修复：阻止应用内正在进行的任何异步保存写入动作
     // 否则它们可能会在 Expand-Archive 解压之后被写入，覆盖掉我们刚刚还原好的数据！
     ConfigManager::instance()->stopSave();
 
-    // PowerShell：解压到 AppData 目录，自动覆盖
-    // Expand-Archive 会把 zip 内容解压到目标目录
+    QTemporaryDir extractDir;
+    if (!extractDir.isValid()) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败", "无法创建临时还原目录。");
+        return;
+    }
+
+    // 先解压到临时目录，校验并补齐外部图标文件后再整体覆盖正式数据目录
     QString psCmd = QString(
         "Expand-Archive -Path '%1' -DestinationPath '%2' -Force"
-    ).arg(zipPath, appDataDir);
+    ).arg(zipPath, normalizeNativePath(extractDir.path()));
 
     QProcess proc;
     proc.setProgram("powershell.exe");
@@ -658,20 +1146,70 @@ void FenceManager::onRestoreFencesRequested()
     proc.waitForFinished(30000);
 
     if (proc.exitCode() != 0) {
+        ConfigManager::instance()->resumeSave();
         QString errMsg = QString::fromUtf8(proc.readAllStandardError());
         QMessageBox::critical(nullptr, "还原失败",
             QString("还原围栏数据时出错：\n%1").arg(errMsg.isEmpty() ? "未知错误" : errMsg));
         return;
     }
 
+    QString patchError;
+    if (!materializeBundledIconsIntoStorage(extractDir.path(), &patchError)) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败",
+            QString("整理备份中的图标文件时出错：\n%1").arg(patchError.isEmpty() ? "未知错误" : patchError));
+        return;
+    }
+
+    const QString extractedJson = normalizeNativePath(extractDir.path() + "/fencing_config.json");
+    const QString extractedStorage = normalizeNativePath(extractDir.path() + "/fences_storage");
+    const QString extractedSettings = normalizeNativePath(extractDir.path() + "/user_settings.ini");
+
     // 验证关键文件存在
-    bool jsonOk    = QFile::exists(oldJson);
-    bool storageOk = QDir(oldStorage).exists();
+    bool jsonOk    = QFile::exists(extractedJson);
+    bool storageOk = QDir(extractedStorage).exists();
 
     if (!jsonOk && !storageOk) {
+        ConfigManager::instance()->resumeSave();
         QMessageBox::warning(nullptr, "还原警告",
             "备份文件似乎不包含有效的围栏数据（fencing_config.json 和 fences_storage 均未找到）。\n"
             "请确认选择了正确的 DeskGo 备份文件。");
+        return;
+    }
+
+    if (QFile::exists(oldJson) && !QFile::remove(oldJson)) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败", QString("无法删除旧配置文件：\n%1").arg(oldJson));
+        return;
+    }
+    if (QDir(oldStorage).exists() && !QDir(oldStorage).removeRecursively()) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败", QString("无法删除旧图标存储目录：\n%1").arg(oldStorage));
+        return;
+    }
+    if (QFile::exists(oldSettings) && !QFile::remove(oldSettings)) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败", QString("无法删除旧设置文件：\n%1").arg(oldSettings));
+        return;
+    }
+
+    QString deployError;
+    if (jsonOk && !copyFileReplacing(extractedJson, oldJson, &deployError)) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败",
+            QString("写入围栏配置失败：\n%1").arg(deployError.isEmpty() ? "未知错误" : deployError));
+        return;
+    }
+    if (storageOk && !copyDirectoryRecursively(extractedStorage, oldStorage, &deployError)) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败",
+            QString("写入图标存储目录失败：\n%1").arg(deployError.isEmpty() ? "未知错误" : deployError));
+        return;
+    }
+    if (QFile::exists(extractedSettings) && !copyFileReplacing(extractedSettings, oldSettings, &deployError)) {
+        ConfigManager::instance()->resumeSave();
+        QMessageBox::critical(nullptr, "还原失败",
+            QString("写入设置文件失败：\n%1").arg(deployError.isEmpty() ? "未知错误" : deployError));
         return;
     }
 

@@ -18,6 +18,7 @@ public:
         QString name;        // 显示名称
         QString path;        // 快捷方式/文件路径
         QString targetPath;  // 目标路径
+        QString originalSourcePath; // 原始来源路径（用户桌面/公用桌面）
         QPixmap icon;        // 图标
         QPoint originalPosition = QPoint(-1, -1); // 原始桌面坐标
         bool isFromDesktop = false; // 是否来自桌面

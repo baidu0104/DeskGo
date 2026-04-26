@@ -5,6 +5,7 @@
 #include <QList>
 #include <QSystemTrayIcon>
 #include <QMenu>
+#include <QSet>
 
 class FenceWindow;
 
@@ -27,6 +28,7 @@ public:
     QList<FenceWindow*> fences() const { return m_fences; }
 
     void saveFences();
+    void setGlobalBackgroundColor(const QColor &color);
     void loadFences();
 
     void showAllFences();
@@ -53,6 +55,8 @@ private:
     void setupTrayIcon();
     void ensureFencesInScreen();    // 确保所有围栏在可用屏幕区域内
     QPoint getNewFencePosition() const;
+    void attachFence(FenceWindow *fence);
+    bool recoverOrphanedStorage(const QJsonObject &data);
 
     QList<FenceWindow*> m_fences;
     QSystemTrayIcon *m_trayIcon;

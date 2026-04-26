@@ -206,3 +206,24 @@ bool BlurHelper::isWindows11()
     return false;
 #endif
 }
+
+void BlurHelper::setupFramelessMenu(QMenu *menu, int radius)
+{
+    if (!menu) return;
+    menu->setCursor(Qt::PointingHandCursor);
+    menu->setAttribute(Qt::WA_TranslucentBackground);
+    menu->setAttribute(Qt::WA_NoSystemBackground);
+    menu->setContentsMargins(1, 1, 1, 1);
+    menu->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    
+#ifdef Q_OS_WIN
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [menu, radius]() {
+        QTimer::singleShot(10, menu, [menu, radius]() {
+            if (!menu) return;
+            enableRoundedCorners(menu, radius);
+            // 确保菜单弹出后能置顶，解决部分环境下焦点丢失问题
+            SetForegroundWindow((HWND)menu->winId());
+        });
+    });
+#endif
+}

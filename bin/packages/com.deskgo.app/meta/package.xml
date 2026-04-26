@@ -1,0 +1,8 @@
+<Package>
+    <DisplayName>DeskGo 桌面整理</DisplayName>
+    <Description>DeskGo 桌面整理工具主程序</Description>
+    <Version>1.5.2</Version>
+    <ReleaseDate>2026-03-06</ReleaseDate>
+    <Default>true</Default>
+    <Required>true</Required>
+</Package>

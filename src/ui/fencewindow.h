@@ -1,7 +1,6 @@
 #ifndef FENCEWINDOW_H
 #define FENCEWINDOW_H
 
-#include <QWidget>
 #include <QLabel>
 #include <QLineEdit>
 #include <QVBoxLayout>
@@ -70,6 +69,8 @@ public:
     
     // 立即保存待处理的更改（停止定时器并触发保存）
     void flushPendingSave();
+
+    bool isRestoringFromJson() const { return m_restoringFromJson; }
     
     // 仅停止保存定时器，不触发任何保存信号（用于还原场景，防止覆盖已还原数据）
     void stopSaveTimer();
@@ -114,7 +115,13 @@ protected:
 private:
     void setupUi();
     void setupBlurEffect();
+    void clearDropIndicator();
+    void insertIconAt(IconWidget *icon, int index);
     QRect titleBarRect() const;
+    void updateBottomAlignmentGuide(const QRect &targetGeo);
+    void showBottomAlignmentGuideAt(int localY);
+    void clearBottomAlignmentGuide();
+    static void clearBottomAlignmentGuides();
     
     // 边缘吸附功能
     static const int SNAP_THRESHOLD = 10; // 吸附阈值（像素）
@@ -143,6 +150,7 @@ private:
         Bottom = 8
     };
     int m_resizeEdge = None;
+    int m_nativeHitResizeEdge = None;
     bool m_isResizing = false;
     QSize m_resizeStartSize;
     QRect m_resizeStartGeo;
@@ -171,6 +179,7 @@ private:
     
     bool m_userHidden = false; // 用户主动隐藏
     bool m_isClosing = false; // 程序正在关闭
+    bool m_restoringFromJson = false; // 正在从配置恢复，避免启动阶段误触发保存
     bool m_alwaysOnTop = false; // 始终置顶模式（默认关闭，不遮挡其他窗口）
     bool m_isAdjustingZOrder = false; // 正在调整 Z-order，避免触发 nativeEvent 的干扰
     
@@ -184,7 +193,11 @@ private:
     bool m_showDropIndicator = false;
     int m_dropIndicatorIndex = -1;
     QRect m_dropIndicatorRect;
-    
+
+    // 底边缩放对齐线
+    QWidget *m_bottomAlignmentGuide = nullptr;
+    QString m_alignmentGuideDebugState;
+
     // 视觉样式
     QColor m_backgroundColor = QColor(30, 30, 35, 200);
 
